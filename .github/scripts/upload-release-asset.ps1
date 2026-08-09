@@ -1,20 +1,26 @@
 <#
 .SYNOPSIS
-    Creates the release for the current tag if absent, then records one artifact's
-    Aliyun OSS coordinates in its notes. Uploads no bytes.
+    Creates the release for the current tag if absent, attaches one artifact to it,
+    and records that artifact's retrieval paths in the notes.
 
 .DESCRIPTION
-    GitHub does not host the binaries. The bytes of record live in Aliyun OSS as a
-    content-addressed blob; a release is the human-facing index over them, carrying
-    the bucket, object key, plaintext sha256 and a copy-pasteable retrieval command.
+    The archive is attached as a release asset, because that is the only retrieval
+    path GitHub serves over a plain URL a browser can follow. The alternatives do not
+    give you a link:
 
-    Why a command and not a link. The bucket is private, has block-public-access on,
-    and objects are written with a private ACL, so there is no URL a reader can just
-    click. A pre-signed URL would work but expires with the STS session that signed
-    it (an hour), which is worse than useless in release notes that outlive it. The
-    coordinates never expire, and anyone with read access on the bucket can act on
-    them. Making the bucket public is not an option available to this repository: it
-    is Utopia's, and it holds Utopia's production assets.
+      - GHCR speaks the OCI token handshake. An anonymous manifest GET is 401 even
+        for a public image, so there is no URL to put in the notes; 'docker pull'
+        performs the handshake for you, and reading the package with the API needs
+        read:packages on the token.
+      - The Aliyun OSS bucket is private with block-public-access on and private
+        object ACLs, so retrieval needs an Aliyun identity. A pre-signed URL would
+        be clickable but expires with the STS session that signed it (an hour, 12
+        with MaxSessionDuration raised), which is worse than useless in notes that
+        outlive it.
+
+    So the notes carry, per artifact: a download link to the attached asset, the
+    GHCR reference for scripted use, and the OSS coordinates once that bucket
+    exists. All three describe the same bytes under the same sha256.
 
     Each build job calls this once for its own artifact. Both jobs target the same
     release, so the body is edited incrementally: this script appends its own section
@@ -30,7 +36,8 @@
     Requires GH_TOKEN, GITHUB_REPOSITORY and GITHUB_REF_NAME in the environment.
 
 .PARAMETER Asset
-    Path to the built artifact. Read for its name and size only; never uploaded.
+    Path to the built artifact. Attached to the release, and read for its name, size
+    and (when the OSS step skipped) its sha256.
 
 .PARAMETER ObjectKey
     OSS object key, from the publish-oss step. When empty the artifact is recorded as
@@ -121,12 +128,14 @@ function Get-ReleaseByTag {
 $preambleMarker = '<!-- everxyz:preamble -->'
 $preambleLines = [System.Collections.Generic.List[string]]::new()
 $preambleLines.Add($preambleMarker)
-$preambleLines.Add('> **Nothing is attached to this release.** Each artifact below says how to fetch')
-$preambleLines.Add('> it, and carries the `sha256` of the plaintext archive so you can verify it.')
+$preambleLines.Add('> **The archives are attached below.** Use the download link in an artifact')
+$preambleLines.Add('> section, or the Assets list at the foot of this page. This repository is')
+$preambleLines.Add('> private, so a browser needs a GitHub session on it: an unauthenticated')
+$preambleLines.Add('> request gets 404, not 403.')
 $preambleLines.Add('>')
-$preambleLines.Add('> The `ghcr.io` packages carry the bytes. They authenticate against GitHub, so')
-$preambleLines.Add('> read access to this repository is already read access to the artifacts and')
-$preambleLines.Add('> there is no second credential to hand out.')
+$preambleLines.Add('> Each artifact also names a `ghcr.io` package holding the same bytes, for a')
+$preambleLines.Add('> script or a Dockerfile that has no browser session. That path needs')
+$preambleLines.Add('> `read:packages` on the token; the attached asset does not.')
 $preambleLines.Add('>')
 $preambleLines.Add('> Aliyun OSS is the intended store of record. Where an artifact lists a bucket')
 $preambleLines.Add('> and object key, that blob is content-addressed and immutable; the bucket is')
@@ -181,7 +190,12 @@ $lines = [System.Collections.Generic.List[string]]::new()
 $lines.Add($marker)
 $lines.Add("### ``$assetName``")
 $lines.Add('')
-$lines.Add("- size: $sizeMb MB")
+# The asset is attached above, so its URL is deterministic and needs no lookup:
+# /releases/download/<tag>/<name>. This is the only retrieval path that is a plain
+# URL a browser can follow -- GHCR needs the OCI token handshake, and the OSS bucket
+# needs an Aliyun identity.
+$lines.Add("**[Download](https://github.com/$repo/releases/download/$tag/$assetName)** ($sizeMb MB)")
+$lines.Add('')
 # The gzip caveat applies only to the OSS blob, which is re-encoded in transport.
 # The GHCR package carries the archive as-is, so claiming a transport encoding that
 # is not there would send a reader looking for a layer to strip.
@@ -200,11 +214,11 @@ if ($ObjectKey -and $Bucket) {
     $lines.Add("- object key: ``$ObjectKey``")
 }
 
-# GHCR first: while OSS is unprovisioned it is the only path that works, and even
-# once OSS exists it stays the one that needs no second credential.
+# The package is the scripted path: same bytes, reachable from a Dockerfile or a CI
+# step without a browser session, at the cost of needing read:packages on the token.
 if ($GhcrReference) {
     $lines.Add('')
-    $lines.Add('Fetch it from GitHub Packages:')
+    $lines.Add('Or pull the package:')
     $lines.Add('')
     $lines.Add('```bash')
     # One command per line, no backslash continuations: these are meant to be
@@ -237,8 +251,9 @@ if ($ObjectKey -and $Bucket) {
 } else {
     $lines.Add('')
     $lines.Add('> Not published to Aliyun OSS: the bucket and its RAM role are not')
-    $lines.Add('> provisioned yet, so this run had nowhere to put the blob. The GHCR')
-    $lines.Add('> package above carries the same bytes and the same `sha256`.')
+    $lines.Add('> provisioned yet, so this run had nowhere to put the blob. The attached')
+    $lines.Add('> asset and the GHCR package above carry the same bytes and the same')
+    $lines.Add('> `sha256`.')
 }
 
 $lines.Add($endMark)
@@ -251,6 +266,44 @@ $release = Get-ReleaseByTag
 if (-not $release) { throw "Release $tag could not be read" }
 $releaseId = $release.PSObject.Properties['id'].Value
 if (-not $releaseId) { throw "Could not resolve a release id for $tag" }
+
+# --- attach the asset --------------------------------------------------------
+# Attached again, reversing the coordinates-only change. That change assumed some
+# other store would serve the bytes over a URL, and none does: GHCR speaks the OCI
+# token handshake, so an anonymous manifest GET is 401 and there is no link to put
+# in the notes, and the OSS bucket is unprovisioned. The two together left a reader
+# with no path from the release page to a file. A release asset is the only thing
+# GitHub serves over a plain URL a browser can follow.
+#
+# Uploaded before the notes are written, so the link in them never points at an
+# asset that is not there yet.
+#
+# Re-runs replace rather than duplicate: POST with a name that already exists gets
+# 422 already_exists, so any previous copy is deleted first. Same convergence rule
+# as the marker replacement below.
+$existingAssets = @()
+$assetsResponse = Invoke-RestMethod -Uri "$api/releases/$releaseId/assets?per_page=100" `
+                                    -Headers $headers -Method Get
+if ($assetsResponse) { $existingAssets = @($assetsResponse) }
+
+foreach ($candidate in $existingAssets) {
+    # PSObject.Properties rather than $candidate.name: Set-StrictMode -Version
+    # Latest throws on a property that is absent rather than returning $null.
+    $nameProp = $candidate.PSObject.Properties['name']
+    if (-not $nameProp -or $nameProp.Value -ne $assetName) { continue }
+    Write-Host "Replacing the existing asset $assetName"
+    $victimId = $candidate.PSObject.Properties['id'].Value
+    Invoke-RestMethod -Uri "$api/releases/assets/$victimId" `
+                      -Headers $headers -Method Delete | Out-Null
+}
+
+Write-Host "Uploading $assetName ($sizeMb MB)"
+# -InFile streams from disk. Reading the bytes into a variable first would hold a
+# few hundred MB in memory, and a Debug archive is ~240 MB.
+$uploadUri = "https://uploads.github.com/repos/$repo/releases/$releaseId/assets?name=$assetName"
+Invoke-RestMethod -Uri $uploadUri -Headers $headers -Method Post `
+                  -InFile $Asset -ContentType 'application/gzip' | Out-Null
+Write-Host "Uploaded $assetName"
 
 $currentBody = ''
 $bodyProperty = $release.PSObject.Properties['body']

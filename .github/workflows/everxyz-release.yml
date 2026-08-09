@@ -262,14 +262,15 @@ jobs:
             -Sha256 '${{ steps.oss.outputs.oss_sha256 }}'
 
       # Last of the three, because it indexes the other two: it records the OSS
-      # coordinates and the GHCR reference, so both have to have run. Nothing is
-      # attached to the release -- the notes are an index over the real stores.
+      # coordinates and the GHCR reference, so both have to have run. It also
+      # attaches the archive itself, which is the only retrieval path that is a
+      # plain URL a browser can follow.
       #
       # UPSTREAM_TAG comes from the Package step via GITHUB_ENV and drives the LGPL
       # corresponding-source link. It is the upstream tag this fork is based on, not
       # the everxyz release tag: we distribute unmodified library binaries, so it is
       # upstream's tarball that is the matching source.
-      - name: Record artifact in release
+      - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -458,7 +459,7 @@ jobs:
 
       # Last of the three, because it indexes the other two. See the windows-x64
       # job for why, and for what UPSTREAM_TAG is.
-      - name: Record artifact in release
+      - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -395,34 +395,41 @@ while `D:` still has hundreds of gigabytes free.
 
 ## 7. Artifact publication (Aliyun OSS + GitHub Packages)
 
-**Nothing is attached to a release.** The bytes live in a GHCR package and, once the
-Aliyun side is provisioned, in an OSS blob as well. The release notes are an index
-over both.
+**The archive is attached to the release.** It is also pushed to GHCR, and once the
+Aliyun side is provisioned it will go to OSS as well. The notes index all three.
 
 | Destination | Role | What lands there |
 | --- | --- | --- |
-| GitHub Packages (GHCR) | retrieval | an OCI image carrying the archive, plus a `catalog.json` of the OSS coordinates |
+| GitHub Releases | retrieval, and the human-facing index | the archive as an attached asset, plus notes carrying `sha256` and every retrieval path |
+| GitHub Packages (GHCR) | scripted retrieval | an OCI image carrying the archive, plus a `catalog.json` of the OSS coordinates |
 | Aliyun OSS | system of record | the archive as an immutable content-addressed blob — **not provisioned yet** |
-| GitHub Releases | human-facing index | notes carrying `sha256`, the GHCR reference, the OSS coordinates when present, and fetch commands — **no attached files** |
+
+A release asset is the only one of the three that is a plain URL a browser can
+follow. GHCR speaks the OCI token handshake, so an anonymous manifest GET is 401 even
+for a public image and there is no link to publish; the OSS bucket is private, so
+retrieval there needs an Aliyun identity.
 
 OSS and GHCR run on a tag or on a manual run with **publish** ticked. The release
 notes are written on a tag only, because a manual run has no tag to attach them to.
 
 **The OSS leg is currently a no-op.** `publish-oss.ps1` exits 0 with a notice when
 `OCCT_OSS_ROLE_ARN` and `OCCT_OSS_OIDC_PROVIDER_ARN` are unset, so a tag build
-succeeds without Aliyun. Until the bucket and role exist, GHCR is the only place the
-bytes land, and the release notes say so per artifact instead of pointing at a blob
-that is not there.
+succeeds without Aliyun. Until the bucket and role exist, the release asset and the
+GHCR package are where the bytes land, and the notes say so per artifact instead of
+pointing at a blob that is not there.
 
 Two consequences worth stating plainly, since they change how you consume a build:
 
-- There is nothing to click on the Releases page. Retrieval is `docker pull` (GitHub
-  credentials) or `ossutil` (Aliyun credentials), not a browser download. The OSS
-  bucket is private with block-public-access on, so a URL would either not work or
-  expire within the hour (see [Why coordinates, not links](#why-coordinates-not-links)).
-- GHCR read access is GitHub read access. The package authenticates against the same
-  identity that grants access to this repository, so anyone who can read the repo can
-  fetch the artifacts with no second credential to issue.
+- Every retrieval path needs a credential of some kind, because the repository is
+  private. A browser needs a GitHub session on it — an unauthenticated request for an
+  asset URL gets 404, not 403. `docker pull` needs `read:packages` on the token.
+  `ossutil` needs an Aliyun identity. There is no anonymous path, and making one
+  would mean an OCCT-owned bucket with a public-read prefix (see
+  [Why coordinates, not links](#why-coordinates-not-links)).
+- Two copies of every archive now sit on GitHub — the release asset and the GHCR
+  layer — and neither expires on its own. A Debug tag is roughly 405 MB per copy
+  across both platforms. Prefer `everxyz-release-*` tags for anything kept around,
+  and delete old Debug pre-releases and their packages when they stop being useful.
 
 This mirrors the `cad test` fixture publication in `D:\everxyz-CQ\code\Utopia`, and
 deliberately reuses its contract rather than inventing a parallel one — same
