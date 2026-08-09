@@ -38,12 +38,14 @@ New-LocalUser -Name "ghrunner" -Password $pw -PasswordNeverExpires -AccountNever
 Add-LocalGroupMember -Group "Users" -Member "ghrunner"
 ```
 
-Give it a work directory it owns, outside your project tree:
+Give it a work directory it owns, outside your project tree. Both the runner and its
+work tree live on `F:` — it has the most free space (672 GB of 1.3 TB), and a full
+OCCT build tree plus install tree for two targets can reach tens of gigabytes:
 
 ```powershell
-New-Item -ItemType Directory -Force -Path C:\actions-runner, D:\ghrunner-work
-icacls D:\ghrunner-work /grant "ghrunner:(OI)(CI)F"
-icacls C:\actions-runner /grant "ghrunner:(OI)(CI)F"
+New-Item -ItemType Directory -Force -Path F:\actions-runner, F:\ghrunner-work
+icacls F:\actions-runner /grant "ghrunner:(OI)(CI)F" /T
+icacls F:\ghrunner-work /grant "ghrunner:(OI)(CI)F" /T
 ```
 
 Docker access is needed for the Linux amd64 job:
@@ -55,9 +57,10 @@ Add-LocalGroupMember -Group "docker-users" -Member "ghrunner"
 ## 2. Download the runner
 
 ```powershell
-cd C:\actions-runner
+cd F:\actions-runner
 $v = "2.336.0"
 Invoke-WebRequest -Uri "https://github.com/actions/runner/releases/download/v$v/actions-runner-win-x64-$v.zip" -OutFile runner.zip
+if ((Get-FileHash runner.zip -Algorithm SHA256).Hash.ToLower() -ne "d59123a43003e357b0805b5d0f611d0bd2f65ab67d51bd070dd4e7a0f685c162") { throw "SHA256 mismatch" }
 Expand-Archive -Path runner.zip -DestinationPath . -Force
 Remove-Item runner.zip
 ```
@@ -68,8 +71,8 @@ Get a registration token from **Settings → Actions → Runners → New self-ho
 runner** (it is valid for one hour). Then:
 
 ```powershell
-cd C:\actions-runner
-.\config.cmd --url https://github.com/everxyz/OCCT --token <REGISTRATION_TOKEN> --name everxyz-win-01 --labels everxyz-win --work D:\ghrunner-work --runasservice --windowslogonaccount ".\ghrunner" --windowslogonpassword "<PASSWORD>"
+cd F:\actions-runner
+.\config.cmd --url https://github.com/everxyz/OCCT --token <REGISTRATION_TOKEN> --name everxyz-win-01 --labels everxyz-win --work F:\ghrunner-work --runasservice --windowslogonaccount ".\ghrunner" --windowslogonpassword "<PASSWORD>" --unattended
 ```
 
 The `--labels everxyz-win` value is what the workflow matches on. The service is
@@ -191,9 +194,27 @@ Get-Service actions.runner.*
 Stop-Service actions.runner.everxyz-OCCT.everxyz-win-01
 
 # deregister (get a removal token from the same settings page)
-cd C:\actions-runner; .\config.cmd remove --token <REMOVAL_TOKEN>
+cd F:\actions-runner; .\config.cmd remove --token <REMOVAL_TOKEN>
 ```
 
-Disk use grows with each build. `D:\ghrunner-work` holds the checkout, the CMake
+Disk use grows with each build. `F:\ghrunner-work` holds the checkout, the CMake
 build tree and the install tree for both targets; a full OCCT build tree can reach
-tens of gigabytes.
+tens of gigabytes. Check headroom with:
+
+```powershell
+Get-PSDrive F | Select-Object Used, Free
+```
+
+The workflow does not clean up between runs beyond `rm -rf` on its own source and
+install directories, so reclaim space by deleting stale job directories under
+`F:\ghrunner-work` when the runner is idle.
+
+The Linux job's disk use lands somewhere else: Docker image layers and build cache
+live in the Docker Desktop WSL2 VM, whose virtual disk on this machine is redirected
+to `D:\WSLData\Docker` (via a symlink from
+`C:\Users\sxd\AppData\Local\Docker\wsl`), so it consumes D: rather than F:. Reclaim
+that space separately:
+
+```powershell
+docker system prune -a --volumes
+```
