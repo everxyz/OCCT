@@ -45,14 +45,26 @@ $headers = @{
 }
 
 # --- find or create the release ---------------------------------------------
-$release = $null
-try {
-    $release = Invoke-RestMethod -Uri "$api/releases/tags/$tag" -Headers $headers -Method Get
-} catch {
-    $status = $null
-    if ($_.Exception.Response) { $status = [int] $_.Exception.Response.StatusCode }
-    if ($status -ne 404) { throw }
+# Reads the status via PSObject.Properties: under Set-StrictMode -Version Latest,
+# '$_.Exception.Response' throws PropertyNotFoundException when the failure is not an
+# HTTP one (TLS, DNS, a proxy resetting the connection), which would hide the real
+# cause behind a misleading error.
+function Get-HttpStatus($errorRecord) {
+    $response = $errorRecord.Exception.PSObject.Properties['Response']
+    if (-not $response -or -not $response.Value) { return $null }
+    return [int] $response.Value.StatusCode
 }
+
+function Get-ReleaseByTag {
+    try {
+        return Invoke-RestMethod -Uri "$api/releases/tags/$tag" -Headers $headers -Method Get
+    } catch {
+        if ((Get-HttpStatus $_) -ne 404) { throw }
+        return $null
+    }
+}
+
+$release = Get-ReleaseByTag
 
 if (-not $release) {
     Write-Host "Creating release $tag"
@@ -64,12 +76,25 @@ if (-not $release) {
         generate_release_notes = $true
     } | ConvertTo-Json -Compress
 
-    $release = Invoke-RestMethod -Uri "$api/releases" -Headers $headers -Method Post `
-                                 -Body $body -ContentType 'application/json'
+    try {
+        $release = Invoke-RestMethod -Uri "$api/releases" -Headers $headers -Method Post `
+                                     -Body $body -ContentType 'application/json'
+    } catch {
+        # The windows-x64 and linux-amd64 jobs both upload to the same tag, so they
+        # race to create the release. The loser gets 422 (already_exists); re-read
+        # instead of failing the build.
+        if ((Get-HttpStatus $_) -ne 422) { throw }
+        Write-Host "Release $tag was created concurrently; re-reading it"
+        $release = Get-ReleaseByTag
+        if (-not $release) { throw "Release $tag reported as existing but could not be read" }
+    }
 }
 
-if (-not $release.id) { throw "Could not resolve a release id for $tag" }
-$releaseId = $release.id
+# Probed via PSObject.Properties rather than '-not $release.id': under
+# Set-StrictMode -Version Latest, reading an absent property throws
+# PropertyNotFoundException, which would replace this message with a cryptic one.
+$releaseId = $release.PSObject.Properties['id'].Value
+if (-not $releaseId) { throw "Could not resolve a release id for $tag" }
 
 # --- replace any existing asset of the same name (makes re-runs idempotent) ---
 $assetName = Split-Path -Leaf $Asset
