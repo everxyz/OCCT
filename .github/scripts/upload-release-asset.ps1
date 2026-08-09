@@ -1,8 +1,25 @@
 <#
 .SYNOPSIS
-    Creates the release for the current tag if absent, then uploads one asset to it.
+    Creates the release for the current tag if absent, then records one artifact's
+    Aliyun OSS coordinates in its notes. Uploads no bytes.
 
 .DESCRIPTION
+    GitHub does not host the binaries. The bytes of record live in Aliyun OSS as a
+    content-addressed blob; a release is the human-facing index over them, carrying
+    the bucket, object key, plaintext sha256 and a copy-pasteable retrieval command.
+
+    Why a command and not a link. The bucket is private, has block-public-access on,
+    and objects are written with a private ACL, so there is no URL a reader can just
+    click. A pre-signed URL would work but expires with the STS session that signed
+    it (an hour), which is worse than useless in release notes that outlive it. The
+    coordinates never expire, and anyone with read access on the bucket can act on
+    them. Making the bucket public is not an option available to this repository: it
+    is Utopia's, and it holds Utopia's production assets.
+
+    Each build job calls this once for its own artifact. Both jobs target the same
+    release, so the body is edited incrementally: this script appends its own section
+    and leaves any other job's section alone.
+
     Uses the REST API directly rather than an action, because this repository's
     Actions policy allows only everxyz-owned actions.
 
@@ -13,12 +30,23 @@
     Requires GH_TOKEN, GITHUB_REPOSITORY and GITHUB_REF_NAME in the environment.
 
 .PARAMETER Asset
-    Path to the file to attach to the release.
+    Path to the built artifact. Read for its name and size only; never uploaded.
+
+.PARAMETER ObjectKey
+    OSS object key, from the publish-oss step. When empty the artifact is recorded as
+    not yet published, so a tag pushed before the Aliyun side is provisioned still
+    produces an honest release rather than a pointer to nothing.
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true, Position = 0)]
-    [string] $Asset
+    [string] $Asset,
+
+    [string] $Bucket = '',
+    [string] $ObjectKey = '',
+    [string] $Sha256 = '',
+    [string] $Region = '',
+    [string] $Endpoint = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -32,6 +60,16 @@ foreach ($name in 'GH_TOKEN', 'GITHUB_REPOSITORY', 'GITHUB_REF_NAME') {
     if (-not (Get-Item "env:$name" -ErrorAction SilentlyContinue).Value) {
         throw "$name is required"
     }
+}
+
+$assetItem = Get-Item -LiteralPath $Asset
+$assetName = $assetItem.Name
+$sizeMb    = [math]::Round($assetItem.Length / 1MB, 1)
+
+# Recomputed only when the OSS step skipped, so the notes always carry a verifiable
+# digest even when there is no object to point at yet.
+if (-not $Sha256) {
+    $Sha256 = (Get-FileHash -LiteralPath $Asset -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
 $repo    = $env:GITHUB_REPOSITORY
@@ -64,54 +102,115 @@ function Get-ReleaseByTag {
     }
 }
 
-$release = Get-ReleaseByTag
+# The preamble explains, once per release, why there is nothing to click. Kept
+# separate from the per-artifact sections so appending never duplicates it.
+$preambleMarker = '<!-- everxyz:preamble -->'
+$preamble = @(
+    $preambleMarker
+    '> **Binaries are not hosted on GitHub.** The bytes of record live in Aliyun OSS as'
+    '> content-addressed blobs. Each artifact below carries its bucket, object key and'
+    '> plaintext `sha256`, plus a command to fetch it.'
+    '>'
+    '> The bucket is private, so these are coordinates rather than clickable links. You'
+    '> need read access on it and either `ossutil` or the `aliyun` CLI configured.'
+) -join "`n"
 
-if (-not $release) {
+if (-not (Get-ReleaseByTag)) {
     Write-Host "Creating release $tag"
     # everxyz-dev-* tags are pre-releases; everxyz-release-* are full releases.
     $body = @{
         tag_name               = $tag
         name                   = $tag
         prerelease             = $tag.StartsWith('everxyz-dev-')
-        generate_release_notes = $true
+        body                   = $preamble
+        generate_release_notes = $false
     } | ConvertTo-Json -Compress
 
     try {
-        $release = Invoke-RestMethod -Uri "$api/releases" -Headers $headers -Method Post `
-                                     -Body $body -ContentType 'application/json'
+        Invoke-RestMethod -Uri "$api/releases" -Headers $headers -Method Post `
+                          -Body $body -ContentType 'application/json' | Out-Null
     } catch {
-        # The windows-x64 and linux-amd64 jobs both upload to the same tag, so they
-        # race to create the release. The loser gets 422 (already_exists); re-read
-        # instead of failing the build.
+        # The windows-x64 and linux-amd64 jobs both target the same tag, so they race
+        # to create the release. The loser gets 422 (already_exists), which is fine:
+        # the re-read below picks up whichever one won.
         if ((Get-HttpStatus $_) -ne 422) { throw }
-        Write-Host "Release $tag was created concurrently; re-reading it"
-        $release = Get-ReleaseByTag
-        if (-not $release) { throw "Release $tag reported as existing but could not be read" }
+        Write-Host "Release $tag was created concurrently"
     }
 }
 
-# Probed via PSObject.Properties rather than '-not $release.id': under
-# Set-StrictMode -Version Latest, reading an absent property throws
-# PropertyNotFoundException, which would replace this message with a cryptic one.
+# --- record this artifact ----------------------------------------------------
+
+# A stable marker per artifact makes re-runs idempotent: a second run for the same
+# artifact replaces its section instead of appending a duplicate.
+$marker  = "<!-- everxyz:artifact:$assetName -->"
+$endMark = "<!-- /everxyz:artifact:$assetName -->"
+
+$lines = [System.Collections.Generic.List[string]]::new()
+$lines.Add($marker)
+$lines.Add("### ``$assetName``")
+$lines.Add('')
+$lines.Add("- size: $sizeMb MB")
+$lines.Add("- sha256 (plaintext, before gzip transport encoding): ``$Sha256``")
+
+if ($ObjectKey -and $Bucket) {
+    $regionNote = if ($Region) { " (``$Region``)" } else { '' }
+    $lines.Add("- bucket: ``$Bucket``$regionNote")
+    $lines.Add("- object key: ``$ObjectKey``")
+    $lines.Add('')
+    $lines.Add('Fetch it:')
+    $lines.Add('')
+    $lines.Add('```bash')
+    # One line, no backslash continuations: this is meant to be copy-pasted, and a
+    # wrapped line breaks when pasted into PowerShell.
+    $endpointArg = if ($Endpoint) { " --endpoint $Endpoint" } else { '' }
+    $lines.Add("ossutil cp oss://$Bucket/$ObjectKey ./$assetName$endpointArg")
+    $lines.Add('```')
+    $lines.Add('')
+    $lines.Add('Stored gzip-encoded, so decode before verifying: the `sha256` above')
+    $lines.Add('covers the plaintext archive.')
+} else {
+    $lines.Add('')
+    $lines.Add('> Not yet published to OSS: Aliyun RAM federation is not configured for')
+    $lines.Add('> this repository. See `.github/RUNNER-SETUP.md` section 7.')
+}
+
+$lines.Add($endMark)
+$section = ($lines -join "`n")
+
+# Re-read immediately before the edit rather than reusing the copy from the create
+# branch above: the other job may have recorded its own section in between, and
+# writing a stale body would silently drop it.
+$release = Get-ReleaseByTag
+if (-not $release) { throw "Release $tag could not be read" }
 $releaseId = $release.PSObject.Properties['id'].Value
 if (-not $releaseId) { throw "Could not resolve a release id for $tag" }
 
-# --- replace any existing asset of the same name (makes re-runs idempotent) ---
-$assetName = Split-Path -Leaf $Asset
-$existing  = Invoke-RestMethod -Uri "$api/releases/$releaseId/assets?per_page=100" `
-                               -Headers $headers -Method Get
-$stale = @($existing) | Where-Object { $_.name -eq $assetName } | Select-Object -First 1
-if ($stale) {
-    Write-Host "Replacing existing asset $assetName"
-    Invoke-RestMethod -Uri "$api/releases/assets/$($stale.id)" -Headers $headers -Method Delete | Out-Null
+$currentBody = ''
+$bodyProperty = $release.PSObject.Properties['body']
+if ($bodyProperty -and $bodyProperty.Value) { $currentBody = $bodyProperty.Value }
+
+if ($currentBody -notlike "*$preambleMarker*") {
+    $currentBody = if ($currentBody) { "$preamble`n`n$currentBody" } else { $preamble }
 }
 
-# --- upload ------------------------------------------------------------------
-$sizeMb = [math]::Round((Get-Item -LiteralPath $Asset).Length / 1MB, 1)
-Write-Host "Uploading $assetName ($sizeMb MB)"
+if ($currentBody -like "*$marker*") {
+    Write-Host "Replacing the existing section for $assetName"
+    # Non-greedy so two artifact sections in one body do not collapse into one match.
+    $pattern = "(?s)" + [regex]::Escape($marker) + ".*?" + [regex]::Escape($endMark)
+    # A scriptblock replacement, so a '$1' or '$&' inside a digest or key is inserted
+    # literally instead of being read as a capture-group reference.
+    $newBody = [regex]::Replace($currentBody, $pattern, { $section })
+} else {
+    Write-Host "Recording $assetName"
+    $newBody = "$currentBody`n`n$section"
+}
 
-$uploadUri = "https://uploads.github.com/repos/$repo/releases/$releaseId/assets?name=$assetName"
-Invoke-RestMethod -Uri $uploadUri -Headers $headers -Method Post `
-                  -InFile $Asset -ContentType 'application/gzip' | Out-Null
+$patch = @{ body = $newBody } | ConvertTo-Json -Compress
+Invoke-RestMethod -Uri "$api/releases/$releaseId" -Headers $headers -Method Patch `
+                  -Body $patch -ContentType 'application/json' | Out-Null
 
-Write-Host "Uploaded $assetName to release $tag"
+if ($ObjectKey) {
+    Write-Host "Recorded $assetName in release $tag (oss://$Bucket/$ObjectKey)"
+} else {
+    Write-Host "Recorded $assetName in release $tag (not published to OSS)"
+}

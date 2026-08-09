@@ -112,13 +112,22 @@ if (-not $tag) { $tag = 'latest' }
 if ($tag.Length -gt 128) { $tag = $tag.Substring(0, 128) }
 $reference = "${image}:${tag}"
 
-$indexOnly = $env:OCCT_GHCR_INDEX_ONLY -in @('true', '1', 'yes')
+# Index-only by default: GitHub does not host the binaries, so the carrier image is a
+# pointer at the OSS blob rather than a copy of it. Baking the archive in would put
+# the bytes back on GitHub's storage by another route, which is what the release notes
+# deliberately stopped doing. Set OCCT_GHCR_INDEX_ONLY=false to make the package
+# self-contained, i.e. 'docker pull' yields the binaries -- at the cost of the
+# account's Packages quota (a Debug pair is ~199 MB Windows + ~265 MB Linux).
+$indexOnly = $true
+if ($env:OCCT_GHCR_INDEX_ONLY) {
+    $indexOnly = $env:OCCT_GHCR_INDEX_ONLY -notin @('false', '0', 'no')
+}
 
 Write-Host ''
 Write-Host "package    $image"
 Write-Host "tag        $tag"
 Write-Host "artifact   $($archiveItem.Name) ($([math]::Round($archiveItem.Length / 1MB, 1)) MB)"
-Write-Host "contents   $(if ($indexOnly) { 'catalog only (OCCT_GHCR_INDEX_ONLY)' } else { 'catalog + archive' })"
+Write-Host "contents   $(if ($indexOnly) { 'catalog only (pointer at the OSS blob)' } else { 'catalog + archive (OCCT_GHCR_INDEX_ONLY=false)' })"
 Write-Host ''
 
 # ---------------------------------------------------------------- staging ----

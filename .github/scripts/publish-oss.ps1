@@ -322,10 +322,15 @@ try {
     if ($env:GITHUB_OUTPUT) {
         # oss_bucket is emitted so the GHCR step can label the coordinates without
         # re-resolving the contract and the OCCT_OSS_* overrides for itself.
+        # region and endpoint are emitted for the release notes, whose retrieval
+        # command needs them: the bucket is private, so a reader has to authenticate
+        # against a named region rather than fetch a public URL.
         @(
             "oss_bucket=$bucket"
             "oss_object_key=$objectKey"
             "oss_sha256=$digest"
+            "oss_region=$region"
+            "oss_endpoint=$endpoint"
         ) | Add-Content -LiteralPath $env:GITHUB_OUTPUT
     }
     if ($env:GITHUB_STEP_SUMMARY) {

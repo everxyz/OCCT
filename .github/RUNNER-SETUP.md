@@ -395,14 +395,27 @@ while `D:` still has hundreds of gigabytes free.
 
 ## 7. Artifact publication (Aliyun OSS + GitHub Packages)
 
-On a tag — or on a manual run with **publish** ticked — each build job publishes its
-`.tar.gz` twice:
+**GitHub does not host the binaries.** Aliyun OSS holds the bytes; everything on
+GitHub is an index over them.
 
 | Destination | Role | What lands there |
 | --- | --- | --- |
 | Aliyun OSS | system of record | the archive as an immutable content-addressed blob |
-| GitHub Packages (GHCR) | discovery | an OCI image indexing that blob, visible on the repo's Packages tab |
-| GitHub Releases | as before | the archive attached to the release |
+| GitHub Packages (GHCR) | discovery | a few-KB OCI image recording the OSS coordinates |
+| GitHub Releases | human-facing index | notes carrying bucket, object key, `sha256` and a fetch command — **no attached files** |
+
+OSS and GHCR run on a tag or on a manual run with **publish** ticked. The release
+notes are written on a tag only, because a manual run has no tag to attach them to.
+
+Two consequences worth stating plainly, since they change how you consume a build:
+
+- There is nothing to click on the Releases page. The bucket is private with
+  block-public-access on, so a URL would either not work or expire within the hour
+  (see [Why coordinates, not links](#why-coordinates-not-links)).
+- `docker pull` gives you the coordinates, not the binaries. That is deliberate:
+  baking the archive into the carrier image would put the bytes back on GitHub's
+  storage by another route. Set `OCCT_GHCR_INDEX_ONLY=false` if you want the
+  self-contained image instead.
 
 This mirrors the `cad test` fixture publication in `D:\everxyz-CQ\code\Utopia`, and
 deliberately reuses its contract rather than inventing a parallel one — same
@@ -432,6 +445,21 @@ or overwrite anything, cannot reach outside the prefix, and cannot be assumed by
 anything but this repository's tagged builds. Read-across is inherent to sharing a
 content-addressed prefix; narrowing it would need a per-repository prefix, which the
 tracked contract does not provide.
+
+### Why coordinates, not links
+
+A release records `bucket`, `object key` and `sha256` plus an `ossutil cp` line,
+rather than a download URL. Three options were considered:
+
+| Form | Why not |
+| --- | --- |
+| Public URL | The bucket is `private` with `block_public_access: true` and objects get a private ACL. It is Utopia's bucket holding Utopia's production assets, so opening it up is not this repository's call. |
+| Pre-signed URL | Works, but is signed by the job's STS credential and dies with it — an hour. Release notes outlive that, so the link would rot into a 403. |
+| Coordinates + command | Never expire, and anyone with read access on the bucket can act on them. |
+
+To make the notes carry a permanent clickable link, Utopia would need to expose an
+anonymously-readable prefix (or a separate bucket) for OCCT artifacts. That is a
+decision for the Utopia side, not something this repository can provision.
 
 ### Why the object key is a digest, not a filename
 
@@ -558,13 +586,16 @@ rather than leaving it orphaned at the org level. The OSS coordinates travel as
 `com.everxyz.occt.oss.*` labels and as a `/catalog.json` inside the image, so a
 consumer can resolve the blob from either.
 
-By default the archive is baked in, so a `docker pull` really does yield the
-binaries. **This consumes the account's Packages storage quota**, and a Debug pair is
-not small (~199 MB Windows + ~265 MB Linux per tag, and nothing expires on its own).
-To keep the package visible without storing the bytes twice, set repository variable
-`OCCT_GHCR_INDEX_ONLY` to `true`: the image then holds only `catalog.json`, a few KB,
-with the OSS coordinates still discoverable. Old versions can be deleted from the
-Packages UI, or:
+**The image is a pointer, not a copy.** It holds only `catalog.json`, a few KB, so
+`docker pull` gives you the OSS coordinates and you fetch the bytes from there. This
+is the default because GitHub is not meant to host the binaries — baking the archive
+in would put them back on GitHub's storage by another route, and it consumes the
+account's Packages quota, which nothing expires on its own (a Debug pair runs ~199 MB
+Windows + ~265 MB Linux per tag).
+
+Set repository variable `OCCT_GHCR_INDEX_ONLY` to `false` for the opposite tradeoff:
+a self-contained image whose `docker pull` really does yield the binaries. Old
+versions can be deleted from the Packages UI, or:
 
 ```bash
 gh api --method DELETE /orgs/everxyz/packages/container/occt/versions/<version-id>
@@ -572,9 +603,16 @@ gh api --method DELETE /orgs/everxyz/packages/container/occt/versions/<version-i
 
 ### Verifying it
 
-A manual run publishes without cutting a tag:
+A manual run exercises OSS and GHCR without cutting a tag:
 
 **Actions → everxyz Build → Run workflow**, targets `windows-x64`, **publish** ✔.
+
+It will not write release notes — those need a tag, since there is no release to
+attach them to otherwise. To exercise the whole path including the notes, push a tag:
+
+```bash
+git tag everxyz-release-0.0.2 && git push origin everxyz-release-0.0.2
+```
 
 The vendored `ossutil` can be installed and checked on its own:
 
