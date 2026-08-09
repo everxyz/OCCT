@@ -21,6 +21,7 @@ concurrency:
 
 jobs:
   clang-format:
+    if: github.repository == 'Open-Cascade-SAS/OCCT'
     name: Check code formatting
     runs-on: windows-2025
 
@@ -36,6 +37,7 @@ jobs:
         base-ref: ${{ github.event.pull_request.base.ref || 'master' }}
 
   ascii-check:
+    if: github.repository == 'Open-Cascade-SAS/OCCT'
     name: Check for non-ASCII characters
     runs-on: windows-2025
 
@@ -53,7 +55,7 @@ jobs:
   documentation:
     name: Build Documentation
     runs-on: windows-2025
-    if: github.ref == 'refs/heads/master'
+    if: github.repository == 'Open-Cascade-SAS/OCCT' && github.ref == 'refs/heads/master'
     needs:
       - clang-format
       - ascii-check
@@ -73,6 +75,7 @@ jobs:
       uses: ./.github/actions/build-docs
 
   prepare-and-build-windows-x64:
+    if: github.repository == 'Open-Cascade-SAS/OCCT'
     name: Prepare and Build on Windows with MSVC (x64)
     runs-on: windows-2025
 
@@ -89,6 +92,7 @@ jobs:
         github-token: ${{ secrets.GITHUB_TOKEN }}
 
   prepare-and-build-macos-x64:
+    if: github.repository == 'Open-Cascade-SAS/OCCT'
     name: Prepare and Build on macOS with Clang (x64)
     runs-on: macos-15
 
@@ -105,6 +109,7 @@ jobs:
         github-token: ${{ secrets.GITHUB_TOKEN }}
 
   prepare-and-build-linux-clang-x64:
+    if: github.repository == 'Open-Cascade-SAS/OCCT'
     name: Prepare and Build on Ubuntu with Clang (x64)
     runs-on: ubuntu-24.04
 
@@ -121,6 +126,7 @@ jobs:
         github-token: ${{ secrets.GITHUB_TOKEN }}
 
   prepare-and-build-linux-gcc-no-pch:
+    if: github.repository == 'Open-Cascade-SAS/OCCT'
     name: Prepare and Build on Ubuntu with GCC (No PCH)
     needs: prepare-and-build-linux-clang-x64
     runs-on: ubuntu-24.04
@@ -143,6 +149,7 @@ jobs:
         github-token: ${{ secrets.GITHUB_TOKEN }}
 
   test-windows-x64:
+    if: github.repository == 'Open-Cascade-SAS/OCCT'
     name: Test on Windows (x64)
     runs-on: windows-2025
     needs: prepare-and-build-windows-x64
@@ -161,6 +168,7 @@ jobs:
         test-script: .github/actions/testgrid/testwindows.tcl
 
   retest-windows-x64:
+    if: github.repository == 'Open-Cascade-SAS/OCCT'
     name: Regression Test on Windows (x64)
     runs-on: windows-2025
     needs: test-windows-x64
@@ -179,6 +187,7 @@ jobs:
         test-directory-name: windows-x64
 
   test-macos-x64:
+    if: github.repository == 'Open-Cascade-SAS/OCCT'
     name: Test on macOS (x64)
     runs-on: macos-15
     needs: prepare-and-build-macos-x64
@@ -197,6 +206,7 @@ jobs:
         test-script: .github/actions/testgrid/testmacos.tcl
 
   retest-macos-x64:
+    if: github.repository == 'Open-Cascade-SAS/OCCT'
     name: Regression Test on macOS (x64)
     runs-on: macos-15
     needs: test-macos-x64
@@ -215,6 +225,7 @@ jobs:
         test-directory-name: macos-x64
 
   test-linux-clang-x64:
+    if: github.repository == 'Open-Cascade-SAS/OCCT'
     name: Test on Linux with Clang (x64)
     runs-on: ubuntu-24.04
     needs: prepare-and-build-linux-clang-x64
@@ -233,6 +244,7 @@ jobs:
         test-script: .github/actions/testgrid/testlinuxclang.tcl
 
   retest-linux-clang-x64:
+    if: github.repository == 'Open-Cascade-SAS/OCCT'
     name: Regression Test on Linux with Clang (x64)
     runs-on: ubuntu-24.04
     needs: test-linux-clang-x64
@@ -251,6 +263,7 @@ jobs:
         test-directory-name: linux-clang-x64
 
   run-gtest-windows-x64:
+    if: github.repository == 'Open-Cascade-SAS/OCCT'
     name: Run GTest on Windows with MSVC (x64)
     needs: prepare-and-build-windows-x64
     runs-on: windows-2025
@@ -268,6 +281,7 @@ jobs:
         artifact-suffix: x64
 
   run-gtest-macos-x64:
+    if: github.repository == 'Open-Cascade-SAS/OCCT'
     name: Run GTest on macOS with Clang (x64)
     needs: prepare-and-build-macos-x64
     runs-on: macos-15
@@ -285,6 +299,7 @@ jobs:
         artifact-suffix: x64
 
   run-gtest-linux-clang-x64:
+    if: github.repository == 'Open-Cascade-SAS/OCCT'
     name: Run GTest on Linux with Clang (x64)
     needs: prepare-and-build-linux-clang-x64
     runs-on: ubuntu-24.04
@@ -302,6 +317,7 @@ jobs:
         artifact-suffix: x64
 
   run-gtest-linux-gcc-no-pch:
+    if: github.repository == 'Open-Cascade-SAS/OCCT'
     name: Run GTest on Ubuntu with GCC (No PCH, Debug)
     needs: prepare-and-build-linux-gcc-no-pch
     runs-on: ubuntu-24.04
@@ -321,7 +337,7 @@ jobs:
   test-summary:
     name: 'Summarize Test Results'
     runs-on: ubuntu-24.04
-    if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+    if: ${{ github.repository == 'Open-Cascade-SAS/OCCT' && !cancelled() && github.event_name == 'pull_request' }}
     needs: [retest-windows-x64, retest-macos-x64, retest-linux-clang-x64]
 
     steps:
