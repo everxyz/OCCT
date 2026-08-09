@@ -337,14 +337,53 @@ if ($bucketProbe.ExitCode -eq 0) {
     }
 } else {
     Write-Host $bucketProbe.Raw
-    throw @"
-Bucket $Bucket does not exist or is not readable by this identity.
 
-It is declared and owned by the Utopia repository
-(third_party/engineering-assets.json, buckets.sdk), so this script does not
-create it. Either the identity you logged in as cannot see it, or it has not been
-provisioned on the Utopia side.
+    # Two failures look identical at the exit-code level and mean very different
+    # things, so read the error OSS actually returned instead of guessing.
+    #
+    #   404 NoSuchBucket -- genuinely absent; a question for the Utopia side.
+    #   403 AccessDenied -- it EXISTS and this identity lacks permission on it.
+    #
+    # Note the wording trap in the 403 case: OSS says "The bucket you access does
+    # not belong to you" (Ec 0003-00000001) for a RAM user with no rights on a
+    # bucket in its OWN account. It reads like an ownership statement and is not
+    # one. Do not infer a different account from it -- that sends you looking in
+    # the wrong place. Ownership can only be settled by an identity that can read
+    # the bucket or its RAM configuration.
+    if ($bucketProbe.Raw -match 'NoSuchBucket') {
+        throw @"
+Bucket $Bucket does not exist.
+
+It is declared by the Utopia repository (third_party/engineering-assets.json,
+buckets.sdk) but has not been provisioned. This script does not create it: it is
+Utopia's bucket, and creating it here would take ownership of something this
+repository does not own. That is a question for the Utopia side.
 "@
+    } else {
+        throw @"
+Bucket $Bucket is not readable by this identity.
+
+Identity: $identityArn
+  (account $accountId)
+
+If OSS said "does not belong to you" above, read that as a permission failure,
+not as evidence the bucket is in another account -- OSS returns that wording for
+a RAM user with no rights on a bucket in its own account.
+
+A bare RAM user is not how this bucket is meant to be reached. Utopia's own
+publishers assume a RAM role (infra/engineering-assets/ram-policies.json:
+UtopiaSdkSupplyPublish, reached through the UtopiaEngineeringAssetAssume policy)
+and the role carries the OSS rights. So either:
+
+  1. Attach an assume policy to this identity and run under the assumed role, or
+  2. Have a privileged identity in the account grant this one oss:GetBucketInfo
+     on $Bucket, or
+  3. Run this script as an identity that already has those rights.
+
+Provisioning the OIDC provider and role below additionally needs ram:* rights,
+which a bare sub-user does not have. The raw OSS error is printed above.
+"@
+    }
 }
 
 # --------------------------------------------------------- OIDC provider -----
