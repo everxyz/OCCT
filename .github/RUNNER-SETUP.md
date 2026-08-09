@@ -400,7 +400,7 @@ Aliyun side is provisioned it will go to OSS as well. The notes index all three.
 
 | Destination | Role | What lands there |
 | --- | --- | --- |
-| GitHub Releases | retrieval, and the human-facing index | the archive as an attached asset, plus notes carrying `sha256` and every retrieval path |
+| GitHub Releases | retrieval, and the human-facing index | the archive as an attached asset, plus notes carrying a download link and its `sha256` |
 | GitHub Packages (GHCR) | scripted retrieval | an OCI image carrying the archive, plus a `catalog.json` of the OSS coordinates |
 | Aliyun OSS | system of record | the archive as an immutable content-addressed blob — **not provisioned yet** |
 
@@ -415,8 +415,13 @@ notes are written on a tag only, because a manual run has no tag to attach them 
 **The OSS leg is currently a no-op.** `publish-oss.ps1` exits 0 with a notice when
 `OCCT_OSS_ROLE_ARN` and `OCCT_OSS_OIDC_PROVIDER_ARN` are unset, so a tag build
 succeeds without Aliyun. Until the bucket and role exist, the release asset and the
-GHCR package are where the bytes land, and the notes say so per artifact instead of
-pointing at a blob that is not there.
+GHCR package are where the bytes land.
+
+The notes themselves stay short on purpose: a download link and a `sha256` per
+artifact, plus the LGPL source pointer. Bucket names, object keys, GHCR references and
+token scopes are operator detail and live here instead — a release page exists to get
+someone a file, and an earlier version that recited the whole publication contract on
+it buried the download link under prose nobody reading it needed.
 
 Two consequences worth stating plainly, since they change how you consume a build:
 

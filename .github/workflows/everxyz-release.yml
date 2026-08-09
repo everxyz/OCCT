@@ -277,13 +277,14 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           & src-win\.github\scripts\upload-release-asset.ps1 $env:ARCHIVE `
+            -Label "Windows x64 ($env:MODE)" `
+            -Sha256 '${{ steps.oss.outputs.oss_sha256 }}' `
+            -UpstreamTag $env:UPSTREAM_TAG `
             -Bucket '${{ steps.oss.outputs.oss_bucket }}' `
             -ObjectKey '${{ steps.oss.outputs.oss_object_key }}' `
-            -Sha256 '${{ steps.oss.outputs.oss_sha256 }}' `
             -Region '${{ steps.oss.outputs.oss_region }}' `
             -Endpoint '${{ steps.oss.outputs.oss_endpoint }}' `
-            -GhcrReference '${{ steps.ghcr.outputs.ghcr_ref }}' `
-            -UpstreamTag $env:UPSTREAM_TAG
+            -GhcrReference '${{ steps.ghcr.outputs.ghcr_ref }}'
 
   linux-amd64:
     name: Linux amd64 (${{ needs.setup.outputs.mode }})
@@ -466,10 +467,11 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           & src-linux\.github\scripts\upload-release-asset.ps1 $env:ARCHIVE `
+            -Label "Linux amd64 ($env:MODE)" `
+            -Sha256 '${{ steps.oss.outputs.oss_sha256 }}' `
+            -UpstreamTag $env:UPSTREAM_TAG `
             -Bucket '${{ steps.oss.outputs.oss_bucket }}' `
             -ObjectKey '${{ steps.oss.outputs.oss_object_key }}' `
-            -Sha256 '${{ steps.oss.outputs.oss_sha256 }}' `
             -Region '${{ steps.oss.outputs.oss_region }}' `
             -Endpoint '${{ steps.oss.outputs.oss_endpoint }}' `
-            -GhcrReference '${{ steps.ghcr.outputs.ghcr_ref }}' `
-            -UpstreamTag $env:UPSTREAM_TAG
+            -GhcrReference '${{ steps.ghcr.outputs.ghcr_ref }}'

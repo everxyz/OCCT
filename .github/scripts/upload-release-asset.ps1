@@ -5,22 +5,17 @@
 
 .DESCRIPTION
     The archive is attached as a release asset, because that is the only retrieval
-    path GitHub serves over a plain URL a browser can follow. The alternatives do not
-    give you a link:
+    path GitHub serves over a plain URL a browser can follow. GHCR speaks the OCI
+    token handshake, so an anonymous manifest GET is 401 and there is no link to
+    publish; the Aliyun OSS bucket is private, so retrieval there needs an Aliyun
+    identity.
 
-      - GHCR speaks the OCI token handshake. An anonymous manifest GET is 401 even
-        for a public image, so there is no URL to put in the notes; 'docker pull'
-        performs the handshake for you, and reading the package with the API needs
-        read:packages on the token.
-      - The Aliyun OSS bucket is private with block-public-access on and private
-        object ACLs, so retrieval needs an Aliyun identity. A pre-signed URL would
-        be clickable but expires with the STS session that signed it (an hour, 12
-        with MaxSessionDuration raised), which is worse than useless in notes that
-        outlive it.
-
-    So the notes carry, per artifact: a download link to the attached asset, the
-    GHCR reference for scripted use, and the OSS coordinates once that bucket
-    exists. All three describe the same bytes under the same sha256.
+    The notes stay deliberately short: per artifact, a download link and a sha256.
+    A release page exists to get someone a file, so how the CI reached its
+    credentials, which bucket the blob also sits in, and which token scope the
+    package needs are all operator detail that belongs in .github/RUNNER-SETUP.md.
+    The one non-obvious line kept in the preamble is the LGPL corresponding-source
+    pointer, which is a distribution obligation rather than a convenience.
 
     Each build job calls this once for its own artifact. Both jobs target the same
     release, so the body is edited incrementally: this script appends its own section
@@ -39,27 +34,28 @@
     Path to the built artifact. Attached to the release, and read for its name, size
     and (when the OSS step skipped) its sha256.
 
-.PARAMETER ObjectKey
-    OSS object key, from the publish-oss step. When empty the artifact is recorded as
-    not yet published, so a tag pushed before the Aliyun side is provisioned still
-    produces an honest release rather than a pointer to nothing.
+.PARAMETER Sha256
+    Digest of the plaintext archive, from the publish-oss step. Recomputed here when
+    that step skipped, so the notes always carry a verifiable digest.
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true, Position = 0)]
     [string] $Asset,
 
+    # Human-readable build name for the section heading, e.g. 'Windows x64 (Release)'.
+    # Falls back to the filename.
+    [string] $Label = '',
+
+    # Only $Sha256 reaches the notes. The rest are accepted because the workflow has
+    # them to hand and a future change may want them, but the notes no longer print
+    # bucket, object key, region or endpoint: they are operator detail, and a reader
+    # who needs them can find them in .github/RUNNER-SETUP.md.
+    [string] $Sha256 = '',
     [string] $Bucket = '',
     [string] $ObjectKey = '',
-    [string] $Sha256 = '',
     [string] $Region = '',
     [string] $Endpoint = '',
-
-    # GHCR reference carrying the same artifact, e.g.
-    # ghcr.io/everxyz/occt:8.0.1-windows-x64-release. Recorded as a retrieval path
-    # in its own right: while OSS is unprovisioned this is the only one that works,
-    # and it is authenticated by the same GitHub identity that grants access to
-    # this repository, so anyone who can read the repository can fetch it.
     [string] $GhcrReference = '',
 
     # Upstream tag the libraries were built from, e.g. V8_0_1. Drives the LGPL
@@ -128,31 +124,18 @@ function Get-ReleaseByTag {
 $preambleMarker = '<!-- everxyz:preamble -->'
 $preambleLines = [System.Collections.Generic.List[string]]::new()
 $preambleLines.Add($preambleMarker)
-$preambleLines.Add('> **The archives are attached below.** Use the download link in an artifact')
-$preambleLines.Add('> section, or the Assets list at the foot of this page. This repository is')
-$preambleLines.Add('> private, so a browser needs a GitHub session on it: an unauthenticated')
-$preambleLines.Add('> request gets 404, not 403.')
-$preambleLines.Add('>')
-$preambleLines.Add('> Each artifact also names a `ghcr.io` package holding the same bytes, for a')
-$preambleLines.Add('> script or a Dockerfile that has no browser session. That path needs')
-$preambleLines.Add('> `read:packages` on the token; the attached asset does not.')
-$preambleLines.Add('>')
-$preambleLines.Add('> Aliyun OSS is the intended store of record. Where an artifact lists a bucket')
-$preambleLines.Add('> and object key, that blob is content-addressed and immutable; the bucket is')
-$preambleLines.Add('> private, so those are coordinates rather than links and need `ossutil` or the')
-$preambleLines.Add('> `aliyun` CLI.')
-
-# LGPL-2.1 section 4 lets an object-code distributor satisfy the source obligation
-# by offering equivalent access to the source from the same place. This fork changes
-# nothing under src/, so upstream's own tarball for the same tag IS the corresponding
-# source, and pointing at it discharges the obligation without publishing anything
-# from this private repository. If a patch to src/ ever lands, that stops being true
-# and section 2(a) starts to apply: the modified source has to be offered too.
+# LGPL-2.1 section 4 lets an object-code distributor satisfy the source obligation by
+# offering equivalent access to the source. This fork changes nothing under src/, so
+# upstream's own tarball for the same tag IS the corresponding source, and pointing at
+# it discharges the obligation without publishing anything from this private
+# repository. If a patch to src/ ever lands, section 2(a) starts to apply instead: the
+# modified source has to be offered too. That is why this line is not decoration.
 if ($UpstreamTag) {
-    $preambleLines.Add('>')
-    $preambleLines.Add("> Built from unmodified upstream OCCT ``$UpstreamTag`` as shared libraries, under")
-    $preambleLines.Add('> LGPL-2.1 with the Open CASCADE exception. Corresponding source:')
-    $preambleLines.Add("> https://github.com/Open-Cascade-SAS/OCCT/archive/refs/tags/$UpstreamTag.tar.gz")
+    $preambleLines.Add("Built from unmodified upstream OCCT ``$UpstreamTag``, shared libraries, no")
+    $preambleLines.Add('visualization. LGPL-2.1 with the Open CASCADE exception;')
+    $preambleLines.Add("[corresponding source](https://github.com/Open-Cascade-SAS/OCCT/archive/refs/tags/$UpstreamTag.tar.gz).")
+} else {
+    $preambleLines.Add('Shared libraries, no visualization. LGPL-2.1 with the Open CASCADE exception.')
 }
 $preamble = ($preambleLines -join "`n")
 
@@ -188,73 +171,22 @@ $endMark = "<!-- /everxyz:artifact:$assetName -->"
 
 $lines = [System.Collections.Generic.List[string]]::new()
 $lines.Add($marker)
-$lines.Add("### ``$assetName``")
+# Platform and mode, not the filename: the filename is already the link text, and
+# 'Windows x64' reads faster than 'occt-8.0.1-windows-x64-release.tar.gz' when you are
+# scanning for the build you want.
+$heading = if ($Label) { $Label } else { $assetName }
+$lines.Add("### $heading")
 $lines.Add('')
 # The asset is attached above, so its URL is deterministic and needs no lookup:
-# /releases/download/<tag>/<name>. This is the only retrieval path that is a plain
-# URL a browser can follow -- GHCR needs the OCI token handshake, and the OSS bucket
-# needs an Aliyun identity.
-$lines.Add("**[Download](https://github.com/$repo/releases/download/$tag/$assetName)** ($sizeMb MB)")
+# /releases/download/<tag>/<name>. This is the only retrieval path that is a plain URL
+# a browser can follow -- GHCR needs the OCI token handshake, and the OSS bucket needs
+# an Aliyun identity. Everything else about those two paths belongs in RUNNER-SETUP.md,
+# not on a page whose job is to get someone a file.
+$lines.Add("[``$assetName``](https://github.com/$repo/releases/download/$tag/$assetName) &nbsp;&nbsp; $sizeMb MB")
 $lines.Add('')
-# The gzip caveat applies only to the OSS blob, which is re-encoded in transport.
-# The GHCR package carries the archive as-is, so claiming a transport encoding that
-# is not there would send a reader looking for a layer to strip.
-if ($ObjectKey -and $Bucket) {
-    $lines.Add("- sha256 (plaintext, before gzip transport encoding): ``$Sha256``")
-} else {
-    $lines.Add("- sha256: ``$Sha256``")
-}
-
-if ($GhcrReference) {
-    $lines.Add("- package: ``$GhcrReference``")
-}
-if ($ObjectKey -and $Bucket) {
-    $regionNote = if ($Region) { " (``$Region``)" } else { '' }
-    $lines.Add("- bucket: ``$Bucket``$regionNote")
-    $lines.Add("- object key: ``$ObjectKey``")
-}
-
-# The package is the scripted path: same bytes, reachable from a Dockerfile or a CI
-# step without a browser session, at the cost of needing read:packages on the token.
-if ($GhcrReference) {
-    $lines.Add('')
-    $lines.Add('Or pull the package:')
-    $lines.Add('')
-    $lines.Add('```bash')
-    # One command per line, no backslash continuations: these are meant to be
-    # copy-pasted, and a wrapped line breaks when pasted into PowerShell.
-    $lines.Add('gh auth token | docker login ghcr.io -u "$(gh api user --jq .login)" --password-stdin')
-    $lines.Add("docker create --name occt-fetch $GhcrReference /x > /dev/null")
-    $lines.Add("docker cp occt-fetch:/$assetName ./$assetName")
-    $lines.Add('docker rm occt-fetch > /dev/null')
-    $lines.Add('```')
-    $lines.Add('')
-    # 'FROM scratch' has no entrypoint, so 'docker create' needs a command argument
-    # to accept the image at all. It is never executed -- the container is only ever
-    # a filesystem to copy out of -- so '/x' not existing is harmless.
-    $lines.Add('The image is `FROM scratch` and holds only the archive plus a')
-    $lines.Add('`catalog.json`. The `/x` argument is never run; `docker create` just')
-    $lines.Add('requires one.')
-}
-
-if ($ObjectKey -and $Bucket) {
-    $lines.Add('')
-    $lines.Add('Or from Aliyun OSS:')
-    $lines.Add('')
-    $lines.Add('```bash')
-    $endpointArg = if ($Endpoint) { " --endpoint $Endpoint" } else { '' }
-    $lines.Add("ossutil cp oss://$Bucket/$ObjectKey ./$assetName$endpointArg")
-    $lines.Add('```')
-    $lines.Add('')
-    $lines.Add('That blob is stored gzip-encoded, so decode it before verifying: the')
-    $lines.Add('`sha256` above covers the plaintext archive.')
-} else {
-    $lines.Add('')
-    $lines.Add('> Not published to Aliyun OSS: the bucket and its RAM role are not')
-    $lines.Add('> provisioned yet, so this run had nowhere to put the blob. The attached')
-    $lines.Add('> asset and the GHCR package above carry the same bytes and the same')
-    $lines.Add('> `sha256`.')
-}
+$lines.Add('```')
+$lines.Add("sha256  $Sha256")
+$lines.Add('```')
 
 $lines.Add($endMark)
 $section = ($lines -join "`n")
