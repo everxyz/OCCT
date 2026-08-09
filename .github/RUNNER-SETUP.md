@@ -46,7 +46,7 @@ icacls D:\ghrunner-work /grant "ghrunner:(OI)(CI)F"
 icacls C:\actions-runner /grant "ghrunner:(OI)(CI)F"
 ```
 
-Docker access is needed for the Linux arm64 job:
+Docker access is needed for the Linux amd64 job:
 
 ```powershell
 Add-LocalGroupMember -Group "docker-users" -Member "ghrunner"
@@ -108,7 +108,10 @@ environment:
 Restart-Service actions.runner.everxyz-OCCT.everxyz-win-01
 ```
 
-## 5. Docker for the Linux arm64 job
+## 5. Docker for the Linux amd64 job
+
+The Linux build runs in an `ubuntu:22.04` container. The host is x86_64 and the
+target is amd64, so this is a native build with no emulation involved.
 
 Docker Desktop must be running when a build starts, and it must be reachable by the
 `ghrunner` account. Docker Desktop runs per-user, which is awkward for a service
@@ -117,16 +120,15 @@ account. Two options:
 - Set Docker Desktop to start on boot and log in once as `ghrunner` so its context
   exists, or
 - switch the Linux job to WSL instead of Docker (Ubuntu-22.04 is already installed),
-  which avoids the service-account problem but loses arm64 emulation.
+  which avoids the service-account problem entirely.
 
-Verify emulation works from the runner account:
+Verify Docker works from the runner account:
 
 ```powershell
-docker run --rm --privileged tonistiigi/binfmt:latest --install arm64
-docker run --rm --platform linux/arm64 arm64v8/ubuntu:22.04 uname -m
+docker run --rm --platform linux/amd64 ubuntu:22.04 uname -m
 ```
 
-The second command should print `aarch64`.
+That should print `x86_64`.
 
 ## 6. Test it
 
@@ -146,12 +148,38 @@ Debug builds use the `everxyz-dev-` prefix and are published as pre-releases:
 git tag everxyz-dev-1.0.0 && git push origin everxyz-dev-1.0.0
 ```
 
-## Notes on the arm64 build
+## Build performance
 
-The host CPU is x86_64, so the Linux arm64 build runs under QEMU emulation. Expect
-it to be several times slower than a native build — potentially hours for a full
-OCCT compile. If this becomes the bottleneck, a native aarch64 machine is the
-answer; the workflow needs only a different `runs-on` label for that job.
+Both targets build natively on this host — no emulation, since host and target are
+both x86_64.
+
+The Windows job uses `--parallel` and gets all 20 threads. The Linux job passes
+`-j$(nproc)`, but it runs inside Docker Desktop's WSL2 VM, which is currently capped
+by `C:\Users\sxd\.wslconfig`:
+
+```ini
+[wsl2]
+processors=8
+memory=16GB
+```
+
+So the Linux build sees 8 threads, not 20. To give it more, raise `processors` there
+and run `wsl --shutdown` (this affects all WSL distros and Docker Desktop, so it is
+left as your call rather than changed by the build):
+
+```powershell
+wsl --shutdown
+```
+
+Confirm what the container actually sees:
+
+```powershell
+docker run --rm --platform linux/amd64 ubuntu:22.04 nproc
+``` The two jobs are
+independent and GitHub will run them concurrently if the runner allows more than one
+job at a time; by default a single runner takes one job at a time, so they will
+queue. Register a second runner on the same machine if you want them in parallel —
+though with both competing for the same cores there is little to gain.
 
 ## Maintenance
 

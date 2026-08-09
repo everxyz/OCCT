@@ -3,8 +3,8 @@
 #   everxyz-release-*  ->  Release build (optimized)
 #   everxyz-dev-*      ->  Debug build (assertions, debug symbols)
 #
-# Targets are Windows x64 (native MSVC) and Linux arm64 (aarch64 in a container).
-# Both run on the self-hosted runner labelled 'everxyz-win'.
+# Targets are Windows x64 (native MSVC) and Linux amd64 (x86_64 in a container).
+# Both are native builds on the self-hosted runner labelled 'everxyz-win'.
 #
 # Deliberately uses no external actions: the repository's Actions policy is set to
 # allow only everxyz-owned actions, so actions/checkout and friends are blocked.
@@ -27,7 +27,7 @@ on:
       targets:
         description: 'Which targets to build'
         type: choice
-        options: [both, windows-x64, linux-arm64]
+        options: [both, windows-x64, linux-amd64]
         default: both
 
 permissions:
@@ -69,7 +69,7 @@ jobs:
           want='${{ inputs.targets }}'
           case "${want:-both}" in
             windows-x64) win=true;  lnx=false ;;
-            linux-arm64) win=false; lnx=true  ;;
+            linux-amd64) win=false; lnx=true  ;;
             *)           win=true;  lnx=true  ;;
           esac
 
@@ -86,7 +86,7 @@ jobs:
             echo "- mode: **$mode**"
             echo "- version: \`$version\`"
             echo "- windows-x64: $win"
-            echo "- linux-arm64: $lnx"
+            echo "- linux-amd64: $lnx"
           } >> "$GITHUB_STEP_SUMMARY"
 
   windows-x64:
@@ -147,8 +147,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash src-win/.github/scripts/upload-release-asset.sh "$ARCHIVE"
 
-  linux-arm64:
-    name: Linux arm64 (${{ needs.setup.outputs.mode }})
+  linux-amd64:
+    name: Linux amd64 (${{ needs.setup.outputs.mode }})
     needs: setup
     if: needs.setup.outputs.build_linux == 'true'
     runs-on: [self-hosted, everxyz-win]
@@ -166,18 +166,18 @@ jobs:
           git fetch --quiet --depth 1 origin "${GITHUB_SHA}"
           git checkout --quiet FETCH_HEAD
 
-      - name: Build in aarch64 container
+      - name: Build in amd64 container
         shell: bash
         run: |
           set -euo pipefail
-          # QEMU emulation for aarch64 on this x86_64 host.
-          docker run --rm --privileged tonistiigi/binfmt:latest --install arm64
+          rm -rf install-linux
 
-          docker run --rm --platform linux/arm64 \
+          # Native x86_64 build: the runner host is amd64, so no emulation.
+          docker run --rm --platform linux/amd64 \
             -v "$(pwd)/src-linux:/src:ro" \
             -v "$(pwd):/out" \
             -e MODE="$MODE" \
-            arm64v8/ubuntu:22.04 bash -euo pipefail -c '
+            ubuntu:22.04 bash -euo pipefail -c '
               export DEBIAN_FRONTEND=noninteractive
               apt-get update -qq
               apt-get install -y -qq --no-install-recommends \
@@ -201,7 +201,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          name="occt-${VERSION}-linux-arm64-$(echo "$MODE" | tr '[:upper:]' '[:lower:]')"
+          name="occt-${VERSION}-linux-amd64-$(echo "$MODE" | tr '[:upper:]' '[:lower:]')"
           tar -czf "${name}.tar.gz" -C install-linux .
           echo "Created ${name}.tar.gz ($(du -h "${name}.tar.gz" | cut -f1))"
           echo "ARCHIVE=${name}.tar.gz" >> "$GITHUB_ENV"
