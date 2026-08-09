@@ -48,7 +48,13 @@ concurrency:
 
 defaults:
   run:
-    shell: powershell
+    # Equivalent to 'shell: powershell' plus -ExecutionPolicy Bypass. The runner's
+    # service account has no execution policy of its own (LocalMachine is Undefined,
+    # i.e. Restricted), so the default would refuse to run the generated .ps1.
+    # Bypass applies to this process only and changes nothing system-wide.
+    # 'powershell' resolves via PATH here; naming an interpreter by absolute path
+    # makes the runner fail with "Second path fragment must not be a drive name".
+    shell: powershell -NoProfile -ExecutionPolicy Bypass -Command ". '{0}'"
 
 jobs:
   setup:
