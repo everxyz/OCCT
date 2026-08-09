@@ -105,10 +105,30 @@ if (-not $RemoveDirectories) {
     }
 } else {
     foreach ($dir in @($RunnerDir, $WorkDir)) {
-        if (Test-Path $dir) { Remove-Item $dir -Recurse -Force; Write-Ok "deleted $dir" }
-        else { Write-Skip "$dir does not exist" }
+        if (-not (Test-Path $dir)) { Write-Skip "$dir does not exist"; continue }
+        try {
+            Remove-Item $dir -Recurse -Force -ErrorAction Stop
+            Write-Ok "deleted $dir"
+        } catch {
+            # install-runner.ps1 strips the inherited Users/Authenticated Users
+            # entries from these trees, so an account that is neither ghrunner nor
+            # an administrator cannot traverse them. Reset the ACL and retry rather
+            # than leaving a half-deleted tree behind.
+            Write-Warn "direct delete failed ($($_.Exception.GetType().Name)); resetting ACLs and retrying"
+            & icacls $dir /reset /T /C /Q 2>&1 | Out-Null
+            & icacls $dir /grant 'Administrators:(OI)(CI)F' /T /C /Q 2>&1 | Out-Null
+            Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
+            if (Test-Path $dir) { Write-Warn "could not delete $dir" }
+            else { Write-Ok "deleted $dir" }
+        }
     }
 }
 
-Write-Host "`nDone. Docker images and build cache are separate; reclaim that with:" -ForegroundColor Cyan
-Write-Host '    docker system prune -a --volumes' -ForegroundColor Gray
+Write-Host "`nDone. Docker images and build cache live in the Docker Desktop VM, not in" -ForegroundColor Cyan
+Write-Host 'these directories. Reclaim only what this pipeline created:' -ForegroundColor Cyan
+Write-Host '    docker image prune -f        # dangling layers only' -ForegroundColor Gray
+Write-Host '    docker rmi ubuntu:22.04      # the one image the Linux job pulls' -ForegroundColor Gray
+Write-Host ''
+Write-Host 'Do NOT run "docker system prune -a --volumes" without checking what else is' -ForegroundColor Yellow
+Write-Host 'on this host: it deletes every image, container and volume, including those' -ForegroundColor Yellow
+Write-Host 'belonging to unrelated projects.' -ForegroundColor Yellow

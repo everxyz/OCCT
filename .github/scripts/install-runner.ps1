@@ -127,6 +127,38 @@ foreach ($dir in @($RunnerDir, $WorkDir)) {
     $null = icacls $dir /grant "${AccountName}:(OI)(CI)F" /T /Q
     if ($LASTEXITCODE -ne 0) { throw "icacls failed on $dir" }
     Write-Ok "granted $AccountName full control of $dir"
+
+    # Drop the broad grants a drive root hands down, so that the runner's own
+    # secrets are not world-readable. $RunnerDir holds .credentials_rsaparams,
+    # the RSA key the runner authenticates to GitHub with: anyone able to copy it
+    # can impersonate this runner and collect jobs, secrets included. Both drive
+    # roots on this host pass down 'Authenticated Users: Modify', so without this
+    # every local account -- including Guest -- can read that key.
+    #
+    # /inheritance:d converts the inherited entries into explicit ones and then
+    # stops inheriting; the explicit copies survive, so they must be removed
+    # afterwards, not before.
+    $null = icacls $dir /inheritance:d /Q
+    if ($LASTEXITCODE -ne 0) { throw "icacls /inheritance:d failed on $dir" }
+
+    # Removal is by account name on purpose. The '*<SID>' form is accepted by
+    # icacls but matches nothing here: it reports "Successfully processed 0
+    # files" and silently leaves the entries in place.
+    foreach ($principal in @('NT AUTHORITY\Authenticated Users', 'BUILTIN\Users')) {
+        $null = icacls $dir /remove:g $principal /T /C /Q
+        if ($LASTEXITCODE -ne 0) { Write-Warn "could not remove '$principal' from $dir" }
+    }
+
+    # Verify rather than trust: confirm no generic principal is left with access.
+    $leftover = (Get-Acl -LiteralPath $dir).Access | Where-Object {
+        $_.AccessControlType -eq 'Allow' -and
+        $_.IdentityReference.Value -in @('BUILTIN\Users', 'NT AUTHORITY\Authenticated Users', 'Everyone')
+    }
+    if ($leftover) {
+        Write-Warn "$dir is still accessible to: $(($leftover.IdentityReference.Value | Select-Object -Unique) -join ', ')"
+    } else {
+        Write-Ok "restricted $dir to $AccountName, SYSTEM and Administrators"
+    }
 }
 
 # --- download ----------------------------------------------------------------
