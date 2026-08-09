@@ -1,0 +1,120 @@
+# Keeps this fork (everxyz/OCCT) up to date with Open-Cascade-SAS/OCCT once per day.
+#
+# Branch syncing goes through the REST merge-upstream endpoint rather than a push.
+# GITHUB_TOKEN is forbidden from pushing commits that touch .github/workflows, and
+# upstream edits those files regularly, so a plain `git push` sync would start
+# failing the first time a workflow file changed upstream. merge-upstream is
+# performed by GitHub server-side and is not subject to that restriction.
+#
+# Nothing here force-updates a ref: diverged branches and moved tags are reported
+# in the run summary and left alone rather than overwritten.
+
+name: Sync Fork with Upstream
+
+on:
+  schedule:
+    # 17:43 UTC daily (01:43 next day at UTC+8). Off-hour to avoid runner contention.
+    - cron: '43 17 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: Open-Cascade-SAS/OCCT
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  sync:
+    name: Sync branches and tags
+    runs-on: ubuntu-latest
+    # Guard so this never runs if the file is ever merged into the upstream repo.
+    if: github.repository != 'Open-Cascade-SAS/OCCT'
+
+    steps:
+      - name: Sync branches via merge-upstream
+        run: |
+          set -uo pipefail
+
+          gh api "repos/$UPSTREAM/branches" --paginate --jq '.[].name' | sort -u > upstream.txt
+          gh api "repos/$GITHUB_REPOSITORY/branches" --paginate --jq '.[].name' | sort -u > fork.txt
+
+          synced=(); current=(); conflict=(); missing=()
+
+          while read -r branch; do
+            if ! grep -qxF "$branch" fork.txt; then
+              missing+=("$branch")
+              continue
+            fi
+
+            # 409 = merge conflict, 422 = anything else (e.g. protected branch).
+            if out=$(gh api --method POST \
+                       "repos/$GITHUB_REPOSITORY/merge-upstream" \
+                       -f "branch=$branch" --jq '.merge_type' 2>&1); then
+              case "$out" in
+                none) current+=("$branch") ;;
+                *)     synced+=("$branch:$out") ;;
+              esac
+            else
+              conflict+=("$branch")
+              echo "::warning::Could not sync '$branch': $out"
+            fi
+          done < upstream.txt
+
+          {
+            echo "## Branches"
+            echo "- synced: ${#synced[@]} ${synced[*]:-}"
+            echo "- already current: ${#current[@]}"
+            echo "- failed / diverged: ${#conflict[@]} ${conflict[*]:-}"
+            echo "- present upstream but not in this fork: ${#missing[@]} ${missing[*]:-}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ ${#conflict[@]} -gt 0 ]; then
+            echo "::warning::Branches needing manual attention: ${conflict[*]}"
+          fi
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::notice::New upstream branches to create manually: ${missing[*]}"
+          fi
+
+      - name: Sync tags
+        run: |
+          set -uo pipefail
+
+          # A bare mirror-style fetch keeps this cheap: refs and trees only, no checkout.
+          git init --quiet tagsync
+          cd tagsync
+          git remote add upstream "https://github.com/$UPSTREAM.git"
+          git remote add origin "https://x-access-token:$GH_TOKEN@github.com/$GITHUB_REPOSITORY.git"
+          git fetch --quiet --filter=blob:none --no-tags upstream 'refs/tags/*:refs/tags/*'
+
+          git ls-remote --tags origin \
+            | sed -n 's|.*refs/tags/\([^^]*\)$|\1|p' | sort -u > have.txt
+
+          new=()
+          while read -r tag; do
+            grep -qxF "$tag" have.txt || new+=("$tag")
+          done < <(git tag --list)
+
+          if [ ${#new[@]} -eq 0 ]; then
+            echo "## Tags" >> "$GITHUB_STEP_SUMMARY"
+            echo "- no new tags" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # No --force, so a tag upstream has moved is rejected instead of rewritten.
+          if git push origin "${new[@]/#/refs/tags/}"; then
+            {
+              echo "## Tags"
+              echo "- pushed: ${#new[@]} ${new[*]}"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::Tag push failed for: ${new[*]}"
+            {
+              echo "## Tags"
+              echo "- push failed: ${new[*]}"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
