@@ -1,0 +1,214 @@
+# Builds everxyz OCCT binaries when an everxyz-release-* or everxyz-dev-* tag is pushed.
+#
+#   everxyz-release-*  ->  Release build (optimized)
+#   everxyz-dev-*      ->  Debug build (assertions, debug symbols)
+#
+# Targets are Windows x64 (native MSVC) and Linux arm64 (aarch64 in a container).
+# Both run on the self-hosted runner labelled 'everxyz-win'.
+#
+# Deliberately uses no external actions: the repository's Actions policy is set to
+# allow only everxyz-owned actions, so actions/checkout and friends are blocked.
+# Checkout, archiving and release upload are done with git, tar and the REST API.
+
+name: everxyz Build
+
+on:
+  push:
+    tags:
+      - 'everxyz-release-*'
+      - 'everxyz-dev-*'
+  workflow_dispatch:
+    inputs:
+      build_mode:
+        description: 'Build mode when run manually'
+        type: choice
+        options: [Release, Debug]
+        default: Release
+      targets:
+        description: 'Which targets to build'
+        type: choice
+        options: [both, windows-x64, linux-arm64]
+        default: both
+
+permissions:
+  contents: write
+
+concurrency:
+  group: everxyz-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  setup:
+    name: Resolve build mode
+    runs-on: [self-hosted, everxyz-win]
+    if: github.repository != 'Open-Cascade-SAS/OCCT'
+    outputs:
+      mode: ${{ steps.resolve.outputs.mode }}
+      version: ${{ steps.resolve.outputs.version }}
+      build_windows: ${{ steps.resolve.outputs.build_windows }}
+      build_linux: ${{ steps.resolve.outputs.build_linux }}
+    steps:
+      - name: Resolve mode and version from tag
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref='${{ github.ref_name }}'
+
+          case "$ref" in
+            everxyz-release-*) mode=Release; version="${ref#everxyz-release-}" ;;
+            everxyz-dev-*)     mode=Debug;   version="${ref#everxyz-dev-}" ;;
+            *)
+              # workflow_dispatch on a branch: fall back to the chosen input.
+              mode='${{ inputs.build_mode }}'
+              mode="${mode:-Release}"
+              version="manual-${GITHUB_SHA::8}"
+              ;;
+          esac
+
+          want='${{ inputs.targets }}'
+          case "${want:-both}" in
+            windows-x64) win=true;  lnx=false ;;
+            linux-arm64) win=false; lnx=true  ;;
+            *)           win=true;  lnx=true  ;;
+          esac
+
+          {
+            echo "mode=$mode"
+            echo "version=$version"
+            echo "build_windows=$win"
+            echo "build_linux=$lnx"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## everxyz build"
+            echo "- tag/ref: \`$ref\`"
+            echo "- mode: **$mode**"
+            echo "- version: \`$version\`"
+            echo "- windows-x64: $win"
+            echo "- linux-arm64: $lnx"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  windows-x64:
+    name: Windows x64 (${{ needs.setup.outputs.mode }})
+    needs: setup
+    if: needs.setup.outputs.build_windows == 'true'
+    runs-on: [self-hosted, everxyz-win]
+    env:
+      MODE: ${{ needs.setup.outputs.mode }}
+      VERSION: ${{ needs.setup.outputs.version }}
+    steps:
+      - name: Checkout at ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf src-win && mkdir src-win && cd src-win
+          git init --quiet
+          git remote add origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --quiet --depth 1 origin "${GITHUB_SHA}"
+          git checkout --quiet FETCH_HEAD
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cmake -S src-win -B build-win -G "Visual Studio 17 2022" -A x64 `
+            -D CMAKE_BUILD_TYPE=$env:MODE `
+            -D BUILD_LIBRARY_TYPE=Shared `
+            -D BUILD_CPP_STANDARD=C++17 `
+            -D BUILD_MODULE_Draw=OFF `
+            -D BUILD_DOC_Overview=OFF `
+            -D USE_FREETYPE=OFF `
+            -D USE_TK=OFF `
+            -D USE_OPENGL=ON `
+            -D INSTALL_DIR="$PWD/install-win"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build and install
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cmake --build build-win --target install --config $env:MODE --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="occt-${VERSION}-windows-x64-$(echo "$MODE" | tr '[:upper:]' '[:lower:]')"
+          tar -czf "${name}.tar.gz" -C install-win .
+          echo "Created ${name}.tar.gz ($(du -h "${name}.tar.gz" | cut -f1))"
+          echo "ARCHIVE=${name}.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Upload to release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash src-win/.github/scripts/upload-release-asset.sh "$ARCHIVE"
+
+  linux-arm64:
+    name: Linux arm64 (${{ needs.setup.outputs.mode }})
+    needs: setup
+    if: needs.setup.outputs.build_linux == 'true'
+    runs-on: [self-hosted, everxyz-win]
+    env:
+      MODE: ${{ needs.setup.outputs.mode }}
+      VERSION: ${{ needs.setup.outputs.version }}
+    steps:
+      - name: Checkout at ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf src-linux && mkdir src-linux && cd src-linux
+          git init --quiet
+          git remote add origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --quiet --depth 1 origin "${GITHUB_SHA}"
+          git checkout --quiet FETCH_HEAD
+
+      - name: Build in aarch64 container
+        shell: bash
+        run: |
+          set -euo pipefail
+          # QEMU emulation for aarch64 on this x86_64 host.
+          docker run --rm --privileged tonistiigi/binfmt:latest --install arm64
+
+          docker run --rm --platform linux/arm64 \
+            -v "$(pwd)/src-linux:/src:ro" \
+            -v "$(pwd):/out" \
+            -e MODE="$MODE" \
+            arm64v8/ubuntu:22.04 bash -euo pipefail -c '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq
+              apt-get install -y -qq --no-install-recommends \
+                build-essential cmake libx11-dev libxext-dev libxmu-dev libxi-dev \
+                libgl1-mesa-dev libglu1-mesa-dev tcl-dev tk-dev
+              cmake -S /src -B /tmp/build -G "Unix Makefiles" \
+                -D CMAKE_BUILD_TYPE="$MODE" \
+                -D BUILD_LIBRARY_TYPE=Shared \
+                -D BUILD_CPP_STANDARD=C++17 \
+                -D BUILD_MODULE_Draw=OFF \
+                -D BUILD_DOC_Overview=OFF \
+                -D USE_FREETYPE=OFF \
+                -D USE_TK=OFF \
+                -D USE_OPENGL=ON \
+                -D INSTALL_DIR=/tmp/install
+              cmake --build /tmp/build --target install -- -j"$(nproc)"
+              cp -a /tmp/install /out/install-linux
+            '
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="occt-${VERSION}-linux-arm64-$(echo "$MODE" | tr '[:upper:]' '[:lower:]')"
+          tar -czf "${name}.tar.gz" -C install-linux .
+          echo "Created ${name}.tar.gz ($(du -h "${name}.tar.gz" | cut -f1))"
+          echo "ARCHIVE=${name}.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Upload to release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash src-linux/.github/scripts/upload-release-asset.sh "$ARCHIVE"
