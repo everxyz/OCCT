@@ -48,7 +48,9 @@ icacls F:\actions-runner /grant "ghrunner:(OI)(CI)F" /T
 icacls F:\ghrunner-work /grant "ghrunner:(OI)(CI)F" /T
 ```
 
-Docker access is needed for the Linux amd64 job:
+Docker access is needed for the Linux amd64 job. Group membership alone is not enough
+here — see [section 5](#5-docker-for-the-linux-amd64-job) for the two separate reasons
+`ghrunner` cannot use the installed Docker CLI, and what the job does instead:
 
 ```powershell
 Add-LocalGroupMember -Group "docker-users" -Member "ghrunner"
@@ -147,16 +149,48 @@ currently `false`, so it does not come back by itself after a reboot. Either ena
 tagging a release. The job fails with an explicit message if the daemon is unreachable
 rather than emitting a confusing `docker run` error.
 
+### Why the job does not use the CLI on PATH
+
+Reaching the daemon is only half of it — the runner also has to be able to *launch*
+the client. On this host every executable under
+`C:\Program Files\Docker\Docker\resources\bin` (10 files) and `...\cli-plugins`
+(15 files) has had its inherited `BUILTIN\Users` read+execute entry stripped and its
+owner reset to `sxd`. `ghrunner` is only in `Users`, so it has no rights at all on
+those files and `docker.exe` fails to start with `Access is denied` before any
+connection is attempted. The ACLs also list a `CodexSandboxUsers` group, so some
+sandboxing tool rewrote them; Docker's installer does not produce this.
+
+The job therefore runs a copy the runner account can execute, via `DOCKER_CLI`:
+
+```
+F:\actions-runner\tools\docker.exe
+```
+
+The Docker CLI is a self-contained Go binary with no external DLL dependencies, so a
+plain file copy behaves identically — it is only a REST client for the daemon, which
+still does all the work. `F:\actions-runner` already grants `Users` read+execute, so
+the copy inherits usable ACLs. If `DOCKER_CLI` is missing the job falls back to
+whatever `docker` is on PATH, so this stays correct on a host with intact ACLs.
+
+Recreate the copy after a Docker Desktop upgrade, to keep client and daemon in step:
+
+```powershell
+Copy-Item "C:\Program Files\Docker\Docker\resources\bin\docker.exe" `
+          "F:\actions-runner\tools\docker.exe" -Force
+```
+
+The alternative is restoring the stripped ACLs (`icacls "C:\Program Files\Docker" /reset /T`
+from an elevated prompt). That needs admin rights, edits a shared system location,
+and gets undone by whatever rewrote them, so the copy is the lower-risk option.
+
 Verify the endpoint:
 
 ```powershell
 $env:DOCKER_HOST = "tcp://localhost:2375"
-docker run --rm --platform linux/amd64 ubuntu:22.04 uname -m
+F:\actions-runner\tools\docker.exe run --rm --platform linux/amd64 ubuntu:22.04 uname -m
 ```
 
 Expected output: `x86_64`.
-
-That should print `x86_64`.
 
 ## 6. Test it
 

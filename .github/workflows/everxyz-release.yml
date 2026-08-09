@@ -209,11 +209,30 @@ jobs:
           # when it is in docker-users. The TCP endpoint is session-independent.
           # Requires "Expose daemon on tcp://localhost:2375" in Docker Desktop.
           DOCKER_HOST: tcp://localhost:2375
+          # Docker Desktop ships its CLI under 'C:\Program Files\Docker', but on this
+          # host every exe there had its inherited 'BUILTIN\Users' read+execute entry
+          # stripped and its owner reset to the interactive user, so the runner account
+          # gets "Access is denied" merely trying to launch docker.exe. The CLI is a
+          # self-contained Go binary with no external DLLs, so a copy the runner account
+          # can execute works identically. Point this at that copy.
+          DOCKER_CLI: F:\actions-runner\tools\docker.exe
         run: |
           $ErrorActionPreference = 'Stop'
           if (Test-Path install-linux) { Remove-Item install-linux -Recurse -Force }
 
-          docker version --format 'daemon {{.Server.Version}}' | Out-Null
+          # Prefer the readable copy; fall back to PATH where the ACLs are intact.
+          $docker = $env:DOCKER_CLI
+          if (-not ($docker -and (Test-Path -LiteralPath $docker))) {
+            $onPath = (Get-Command docker -ErrorAction SilentlyContinue).Source
+            if (-not $onPath) {
+              Write-Host "::error::No docker CLI found (DOCKER_CLI unset/missing, none on PATH)."
+              exit 1
+            }
+            $docker = $onPath
+          }
+          Write-Host "docker CLI: $docker"
+
+          & $docker version --format 'daemon {{.Server.Version}}' | Out-Null
           if ($LASTEXITCODE -ne 0) {
             Write-Host "::error::Cannot reach the Docker daemon on $env:DOCKER_HOST."
             Write-Host "Enable 'Expose daemon on tcp://localhost:2375 without TLS' in"
@@ -253,7 +272,7 @@ jobs:
                                          (New-Object System.Text.UTF8Encoding($false)))
 
           # Native x86_64 build: the runner host is amd64, so no emulation.
-          & docker @(
+          & $docker @(
             'run','--rm','--platform','linux/amd64',
             '-v', "${here}\src-linux:/src:ro",
             '-v', "${here}:/out",
