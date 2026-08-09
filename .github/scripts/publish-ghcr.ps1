@@ -216,8 +216,42 @@ try {
     # to any process list on this shared, non-ephemeral runner.
     if (-not $DryRun) {
         Write-Host "logging in to ghcr.io as $($env:GITHUB_ACTOR)"
-        $env:GITHUB_TOKEN | & $docker login ghcr.io --username $env:GITHUB_ACTOR --password-stdin
-        if ($LASTEXITCODE -ne 0) { throw "docker login ghcr.io failed ($LASTEXITCODE)" }
+
+        # NOT '$env:GITHUB_TOKEN | & $docker login --password-stdin'. Piping a
+        # string to a native executable in Windows PowerShell 5.1 encodes it with
+        # $OutputEncoding, which prepends a UTF-8 BOM and appends CRLF: docker
+        # then reads "\xef\xbb\xbf<token>\r\n" as the password and ghcr.io answers
+        # 'denied: denied'. Verified by piping to a byte-dumping process.
+        #
+        # So the token is written to the child's stdin as exact bytes. Still not
+        # argv: this runner is shared and non-ephemeral, and a token there would
+        # be readable from any local process list.
+        $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+        $startInfo.FileName = $docker
+        # A single Arguments string, not ArgumentList: the latter only exists on
+        # .NET Core, and this is Windows PowerShell 5.1 on .NET Framework 4.x.
+        # GITHUB_ACTOR is a GitHub login (no spaces or quotes), but it is the one
+        # interpolated value here, so it is quoted rather than trusted.
+        $actor = ($env:GITHUB_ACTOR -replace '"', '')
+        $startInfo.Arguments = "login ghcr.io --username `"$actor`" --password-stdin"
+        $startInfo.RedirectStandardInput = $true
+        $startInfo.UseShellExecute = $false
+
+        $loginProcess = [System.Diagnostics.Process]::Start($startInfo)
+        try {
+            $stdin = $loginProcess.StandardInput
+            # No BOM, no trailing newline: docker trims, but the BOM is the bug.
+            $bytes = [System.Text.Encoding]::ASCII.GetBytes($env:GITHUB_TOKEN)
+            $stdin.BaseStream.Write($bytes, 0, $bytes.Length)
+            $stdin.BaseStream.Flush()
+            $stdin.Close()
+            $loginProcess.WaitForExit()
+            if ($loginProcess.ExitCode -ne 0) {
+                throw "docker login ghcr.io failed ($($loginProcess.ExitCode))"
+            }
+        } finally {
+            $loginProcess.Dispose()
+        }
     }
 
     try {
