@@ -38,9 +38,22 @@ on:
         type: choice
         options: [both, windows-x64, linux-amd64]
         default: both
+      publish:
+        description: 'Also publish to Aliyun OSS and GitHub Packages (tags do this automatically)'
+        type: boolean
+        default: false
 
+# The repository default is read-only (default_workflow_permissions: read), so
+# every scope has to be named here.
+#   contents: write  -- create the release and upload its assets
+#   packages: write  -- push the carrier image to ghcr.io
+#   id-token: write  -- mint the OIDC token that Aliyun RAM federates on. Without
+#                       it Actions injects no ACTIONS_ID_TOKEN_REQUEST_* pair and
+#                       there is no way to reach OSS without a static AccessKey.
 permissions:
   contents: write
+  packages: write
+  id-token: write
 
 concurrency:
   group: everxyz-build-${{ github.ref }}
@@ -176,6 +189,38 @@ jobs:
           $ErrorActionPreference = 'Stop'
           & src-win\.github\scripts\upload-release-asset.ps1 $env:ARCHIVE
 
+      - name: Publish to Aliyun OSS
+        id: oss
+        if: startsWith(github.ref, 'refs/tags/') || inputs.publish
+        env:
+          # ARNs, not secrets: they name a role, they do not grant it. The trust
+          # policy on the role is what decides whether this repository's OIDC
+          # token is accepted, so publishing them is harmless.
+          OCCT_OSS_ROLE_ARN: ${{ vars.OCCT_OSS_ROLE_ARN }}
+          OCCT_OSS_OIDC_PROVIDER_ARN: ${{ vars.OCCT_OSS_OIDC_PROVIDER_ARN }}
+          OCCT_OSS_BUCKET: ${{ vars.OCCT_OSS_BUCKET }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & src-win\.github\scripts\publish-oss.ps1 -Archive $env:ARCHIVE `
+            -Platform windows-x64 -Mode $env:MODE -Version $env:VERSION
+
+      - name: Publish to GitHub Packages
+        if: startsWith(github.ref, 'refs/tags/') || inputs.publish
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Needed even in this native-Windows job: the carrier image is built by
+          # the Linux daemon. Same vendored-CLI reasoning as the linux-amd64 job.
+          DOCKER_HOST: tcp://localhost:2375
+          DOCKER_CLI: F:\actions-runner\tools\docker.exe
+          OCCT_GHCR_INDEX_ONLY: ${{ vars.OCCT_GHCR_INDEX_ONLY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & src-win\.github\scripts\publish-ghcr.ps1 -Archive $env:ARCHIVE `
+            -Platform windows-x64 -Mode $env:MODE -Version $env:VERSION `
+            -OssBucket '${{ steps.oss.outputs.oss_bucket }}' `
+            -OssObjectKey '${{ steps.oss.outputs.oss_object_key }}' `
+            -Sha256 '${{ steps.oss.outputs.oss_sha256 }}'
+
   linux-amd64:
     name: Linux amd64 (${{ needs.setup.outputs.mode }})
     needs: setup
@@ -300,3 +345,30 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           & src-linux\.github\scripts\upload-release-asset.ps1 $env:ARCHIVE
+
+      - name: Publish to Aliyun OSS
+        id: oss
+        if: startsWith(github.ref, 'refs/tags/') || inputs.publish
+        env:
+          OCCT_OSS_ROLE_ARN: ${{ vars.OCCT_OSS_ROLE_ARN }}
+          OCCT_OSS_OIDC_PROVIDER_ARN: ${{ vars.OCCT_OSS_OIDC_PROVIDER_ARN }}
+          OCCT_OSS_BUCKET: ${{ vars.OCCT_OSS_BUCKET }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & src-linux\.github\scripts\publish-oss.ps1 -Archive $env:ARCHIVE `
+            -Platform linux-amd64 -Mode $env:MODE -Version $env:VERSION
+
+      - name: Publish to GitHub Packages
+        if: startsWith(github.ref, 'refs/tags/') || inputs.publish
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DOCKER_HOST: tcp://localhost:2375
+          DOCKER_CLI: F:\actions-runner\tools\docker.exe
+          OCCT_GHCR_INDEX_ONLY: ${{ vars.OCCT_GHCR_INDEX_ONLY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & src-linux\.github\scripts\publish-ghcr.ps1 -Archive $env:ARCHIVE `
+            -Platform linux-amd64 -Mode $env:MODE -Version $env:VERSION `
+            -OssBucket '${{ steps.oss.outputs.oss_bucket }}' `
+            -OssObjectKey '${{ steps.oss.outputs.oss_object_key }}' `
+            -Sha256 '${{ steps.oss.outputs.oss_sha256 }}'

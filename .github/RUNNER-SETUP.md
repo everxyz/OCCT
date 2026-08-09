@@ -359,3 +359,165 @@ Also note `docker_data.vhdx` is sparse and never shrinks on its own: its size is
 high-water mark, not live data. Compacting it needs `wsl --shutdown` plus
 `Optimize-VHD`, which risks the whole Docker data disk if interrupted — not worth doing
 while `D:` still has hundreds of gigabytes free.
+
+## 7. Artifact publication (Aliyun OSS + GitHub Packages)
+
+On a tag — or on a manual run with **publish** ticked — each build job publishes its
+`.tar.gz` twice:
+
+| Destination | Role | What lands there |
+| --- | --- | --- |
+| Aliyun OSS | system of record | the archive as an immutable content-addressed blob |
+| GitHub Packages (GHCR) | discovery | an OCI image indexing that blob, visible on the repo's Packages tab |
+| GitHub Releases | as before | the archive attached to the release |
+
+This mirrors the `cad test` fixture publication in `D:\everxyz-CQ\code\Utopia`, and
+deliberately reuses its contract rather than inventing a parallel one — same
+`ossutil` 2.3.0 pinned by the same SHA-256, same `blobs/gzip/sha256/<digest>` key
+layout, same gzip transport encoding, same immutability rules. A consumer that can
+restore a Utopia engineering asset can restore an OCCT artifact with the same code.
+
+The contract lives in [`oss-artifacts.json`](oss-artifacts.json). The bucket and the
+RAM roles are **not** shared with Utopia: OCCT binaries are a different asset class,
+and reusing `everxyz-utopia-fixtures-cn-shenzhen` would let a build job write into
+Utopia's fixture trust domain.
+
+### Why the object key is a digest, not a filename
+
+The key is `blobs/gzip/sha256/<sha256-of-the-plaintext-archive>`. Uploads pass
+`--forbid-overwrite`, so objects are immutable and re-running a build that produces
+identical bytes is a verified no-op instead of a rewrite. The publish role holds
+`oss:GetObject` and `oss:PutObject` only — there is no delete action anywhere in
+this path, matching Utopia's `fixtures_publish` policy.
+
+The `sha256` recorded in object metadata covers the **plaintext** archive, not the
+gzip-encoded body that is transferred. `.tar.gz` content gets gzipped a second time
+for transport; that costs about 0.1% in size and keeps the key prefix's promise
+(`blobs/gzip/...`) true, so a reader knows to decode without probing.
+
+### Credentials: no static AccessKey
+
+Utopia has two credential paths and neither transfers to a CI runner: `aliyun-cli`
+OAuth is interactive, and ACK RRSA needs a Kubernetes service account. This uses the
+third form of the same idea — **GitHub OIDC federated into RAM** via
+`sts:AssumeRoleWithOIDC`. The job proves its identity with a short-lived token and
+receives short-lived STS credentials. Nothing static is stored in this repository;
+there are no repository secrets for Aliyun at all.
+
+The STS triple reaches `ossutil` through `OSS_ACCESS_KEY_ID`,
+`OSS_ACCESS_KEY_SECRET` and `OSS_SESSION_TOKEN` in the environment, never in argv
+and never in a config file. That matters more here than on a hosted runner: this box
+is not ephemeral, so a credential written to `~/.ossutilconfig` would outlive the
+job, and one passed as an argument would be visible to any local process list. Only
+`OSS_SESSION_TOKEN` makes `ossutil` send the `x-oss-security-token` header, so all
+three are required — an AK/SK pair alone gets a `403 InvalidAccessKeyId` from STS
+credentials.
+
+### Aliyun setup (one-off, by hand)
+
+Nothing below is automated: it touches your Aliyun account, not this machine.
+
+1. **Create the bucket** `everxyz-occt-artifacts-cn-shenzhen` in `cn-shenzhen`,
+   ACL private, block public access on, versioning disabled. Match
+   `bucket_contract` in `oss-artifacts.json`.
+
+2. **Create an OIDC provider** in RAM pointing at GitHub:
+
+   - issuer URL `https://token.actions.githubusercontent.com`
+   - client ID (audience) `sts.aliyuncs.com`
+
+3. **Create the publish role**, e.g. `OcctArtifactsPublish`, with a trust policy
+   that accepts only this repository. Scope it on `sub` — an audience check alone
+   would let *any* GitHub repository assume the role:
+
+   ```json
+   {
+     "Version": "1",
+     "Statement": [{
+       "Effect": "Allow",
+       "Action": "sts:AssumeRoleWithOIDC",
+       "Principal": { "Federated": ["acs:ram::<account-id>:oidc-provider/github-actions"] },
+       "Condition": {
+         "StringEquals": {
+           "oidc:aud": ["sts.aliyuncs.com"],
+           "oidc:iss": ["https://token.actions.githubusercontent.com"]
+         },
+         "StringLike": {
+           "oidc:sub": ["repo:everxyz/OCCT:ref:refs/tags/*"]
+         }
+       }
+     }]
+   }
+   ```
+
+   Attach a policy carrying exactly `oss:GetObject` and `oss:PutObject` on
+   `acs:oss:*:*:everxyz-occt-artifacts-cn-shenzhen/blobs/gzip/sha256/*`.
+
+   The `oidc:sub` pattern above only matches tag pushes. Manual runs with
+   **publish** ticked come from a branch and will be refused; add
+   `repo:everxyz/OCCT:ref:refs/heads/master` if you want those to work too.
+
+4. **Set two repository variables** — Settings → Secrets and variables → Actions →
+   **Variables** (not Secrets; these are ARNs, which name a role but do not grant
+   it — the trust policy decides that):
+
+   | Variable | Value |
+   | --- | --- |
+   | `OCCT_OSS_ROLE_ARN` | `acs:ram::<account-id>:role/occtartifactspublish` |
+   | `OCCT_OSS_OIDC_PROVIDER_ARN` | `acs:ram::<account-id>:oidc-provider/github-actions` |
+
+   Optional: `OCCT_OSS_BUCKET` and `OCCT_OSS_REGION` override the contract without
+   a commit.
+
+Until those variables exist the OSS step **skips with a notice and the build still
+passes**, so this can ship before the Aliyun side is provisioned. The GitHub
+Packages step does not depend on them and works immediately.
+
+### GitHub Packages, and the storage caveat
+
+GitHub Packages has no generic file registry — the formats are OCI, npm, NuGet,
+Maven and RubyGems — so the archive is wrapped in a `FROM scratch` OCI image. That
+needs no new tooling, since the runner already has a working Docker CLI and daemon
+for the Linux build; ORAS would have been another binary to vendor and pin.
+
+One package, `ghcr.io/everxyz/occt`, tagged `<version>-<platform>-<mode>`:
+
+```bash
+docker pull ghcr.io/everxyz/occt:1.0.0-linux-amd64-release
+```
+
+`org.opencontainers.image.source` is what attaches the package to this repository
+rather than leaving it orphaned at the org level. The OSS coordinates travel as
+`com.everxyz.occt.oss.*` labels and as a `/catalog.json` inside the image, so a
+consumer can resolve the blob from either.
+
+By default the archive is baked in, so a `docker pull` really does yield the
+binaries. **This consumes the account's Packages storage quota**, and a Debug pair is
+not small (~199 MB Windows + ~265 MB Linux per tag, and nothing expires on its own).
+To keep the package visible without storing the bytes twice, set repository variable
+`OCCT_GHCR_INDEX_ONLY` to `true`: the image then holds only `catalog.json`, a few KB,
+with the OSS coordinates still discoverable. Old versions can be deleted from the
+Packages UI, or:
+
+```bash
+gh api --method DELETE /orgs/everxyz/packages/container/occt/versions/<version-id>
+```
+
+### Verifying it
+
+A manual run publishes without cutting a tag:
+
+**Actions → everxyz Build → Run workflow**, targets `windows-x64`, **publish** ✔.
+
+The vendored `ossutil` can be installed and checked on its own:
+
+```powershell
+powershell -File .github\scripts\install-ossutil.ps1
+```
+
+And the GHCR image can be built and inspected without pushing, which needs no
+`write:packages` token:
+
+```powershell
+.github\scripts\publish-ghcr.ps1 -Archive <some>.tar.gz -Platform linux-amd64 -Mode Release -Version 0.0.0 -DryRun
+```

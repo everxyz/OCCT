@@ -1,0 +1,69 @@
+{
+  "_comment": [
+    "Publication contract for everxyz OCCT build artifacts, modelled on Utopia's",
+    "third_party/engineering-assets.json (schema utopia-engineering-assets.v1).",
+    "",
+    "Kept identical to Utopia where the property is part of the shared contract:",
+    "region, endpoints, object_key_prefix, transport_encoding and bucket_contract.",
+    "A consumer that can restore a Utopia engineering asset can restore an OCCT",
+    "artifact with the same code path.",
+    "",
+    "Deliberately NOT shared with Utopia: the bucket and the RAM roles. OCCT",
+    "binaries are a different asset class from Utopia's fixtures and vendor SDKs,",
+    "so they get their own bucket and their own publish/read roles. Reusing",
+    "everxyz-utopia-fixtures-cn-shenzhen would let an OCCT build job write into",
+    "Utopia's fixture trust domain.",
+    "",
+    "Every value here is overridable at runtime by the matching OCCT_OSS_*",
+    "repository variable, so the bucket can be renamed without a code change."
+  ],
+  "schema_version": "everxyz-occt-artifacts.v1",
+  "provider": "aliyun-oss",
+  "region": "cn-shenzhen",
+  "regional_endpoint": "https://oss-cn-shenzhen.aliyuncs.com",
+  "internal_endpoint": "https://oss-cn-shenzhen-internal.aliyuncs.com",
+  "sts_endpoint": "https://sts.cn-shenzhen.aliyuncs.com",
+  "object_key_prefix": "blobs/gzip/sha256",
+  "transport_encoding": "gzip",
+  "bucket": {
+    "name": "everxyz-occt-artifacts-cn-shenzhen",
+    "profiles": {
+      "read": "occt-artifacts-read",
+      "publish": "occt-artifacts-publish"
+    }
+  },
+  "bucket_contract": {
+    "storage_class": "Standard",
+    "redundancy_type": "ZRS",
+    "acl": "private",
+    "block_public_access": true,
+    "versioning": "disabled",
+    "server_side_encryption": "disabled",
+    "cross_region_replication": "disabled",
+    "abort_incomplete_multipart_upload_days": 7
+  },
+  "publication_contract": {
+    "overwrite_forbidden": true,
+    "delete_action_present": false,
+    "policy_actions": ["oss:GetObject", "oss:PutObject"],
+    "object_acl": "private",
+    "metadata": ["sha256", "transport-encoding"],
+    "digest_covers": "the plaintext artifact, before transport encoding"
+  },
+  "credentials": {
+    "_comment": [
+      "GitHub OIDC federated into RAM via sts:AssumeRoleWithOIDC. This is the",
+      "closest available analogue to Utopia's ACK RRSA path: the workload proves",
+      "its identity with a short-lived OIDC token and receives short-lived STS",
+      "credentials. No static AccessKey is stored in this repository.",
+      "",
+      "Utopia's other mechanism, aliyun-cli OAuth, is for humans at a terminal and",
+      "cannot work unattended on a runner."
+    ],
+    "mechanism": "sts:AssumeRoleWithOIDC",
+    "oidc_issuer": "https://token.actions.githubusercontent.com",
+    "audience": "sts.aliyuncs.com",
+    "session_duration_seconds": 3600,
+    "static_access_key_retained": false
+  }
+}
