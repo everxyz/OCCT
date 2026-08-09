@@ -155,6 +155,21 @@ jobs:
       - name: Configure
         run: |
           $ErrorActionPreference = 'Stop'
+
+          # The install tree is wiped first, the same way the linux-amd64 job wipes
+          # install-linux. It is not a build directory: it is a flat merge of whatever
+          # any previous run installed, and 'cmake --install' only overwrites the files
+          # the CURRENT configuration installs -- everything else it leaves alone and
+          # reports as 'Up-to-date'. So a Release run over a Debug tree ships the Debug
+          # leftovers too, and the archive silently describes a build that never
+          # happened. That is exactly what everxyz-release-8.0.1 hit: 27 Debug .lib
+          # files from the preceding rc2 Debug run turned up in a Release archive.
+          #
+          # build-win is deliberately kept. Visual Studio is a multi-config generator,
+          # so Debug and Release objects live in separate subdirectories and cannot
+          # contaminate each other; reusing it is what keeps a rebuild incremental.
+          if (Test-Path install-win) { Remove-Item install-win -Recurse -Force }
+
           # Headless CAD kernel: STEP/IGES import, BRep modelling, mesh generation.
           # No visualization.
           #
