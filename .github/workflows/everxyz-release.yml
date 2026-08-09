@@ -40,20 +40,22 @@ on:
         options: [both, windows-x64, linux-amd64]
         default: both
       publish:
-        description: 'Also publish to Aliyun OSS and GitHub Packages (tags do this automatically)'
+        description: 'Also publish to Aliyun OSS (tags do this automatically)'
         type: boolean
         default: false
 
 # The repository default is read-only (default_workflow_permissions: read), so
 # every scope has to be named here.
 #   contents: write  -- create the release and upload its assets
-#   packages: write  -- push the carrier image to ghcr.io
 #   id-token: write  -- mint the OIDC token that Aliyun RAM federates on. Without
 #                       it Actions injects no ACTIONS_ID_TOKEN_REQUEST_* pair and
 #                       there is no way to reach OSS without a static AccessKey.
+#
+# 'packages: write' is deliberately absent: the GHCR step is gated off by default,
+# and a scope granting a write that nothing performs is worth not handing out. Add
+# it back alongside OCCT_PUBLISH_GHCR=true.
 permissions:
   contents: write
-  packages: write
   id-token: write
 
 concurrency:
@@ -243,9 +245,18 @@ jobs:
           & src-win\.github\scripts\publish-oss.ps1 -Archive $env:ARCHIVE `
             -Platform windows-x64 -Mode $env:MODE -Version $env:VERSION
 
+      # Off unless OCCT_PUBLISH_GHCR is 'true'. The carrier image existed because it
+      # was once the only way to actually get the bytes; attaching the archive to the
+      # release replaced that, and leaving both on meant two copies of every archive
+      # on GitHub (~405 MB per Debug tag) with nothing expiring either.
+      #
+      # Not deleted, because the index-only mode is the eventual shape of this: once
+      # OSS holds the blob, a few-KB pointer image is a reasonable thing to publish.
+      # It just cannot be turned on yet -- with OCCT_OSS_ROLE_ARN unset publish-oss
+      # skips, so catalog.json would point at an object that does not exist.
       - name: Publish to GitHub Packages
         id: ghcr
-        if: startsWith(github.ref, 'refs/tags/') || inputs.publish
+        if: (startsWith(github.ref, 'refs/tags/') || inputs.publish) && vars.OCCT_PUBLISH_GHCR == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Needed even in this native-Windows job: the carrier image is built by
@@ -261,10 +272,13 @@ jobs:
             -OssObjectKey '${{ steps.oss.outputs.oss_object_key }}' `
             -Sha256 '${{ steps.oss.outputs.oss_sha256 }}'
 
-      # Last of the three, because it indexes the other two: it records the OSS
-      # coordinates and the GHCR reference, so both have to have run. It also
-      # attaches the archive itself, which is the only retrieval path that is a
-      # plain URL a browser can follow.
+      # Last of the three, because it indexes whichever of the other two ran. A
+      # skipped step's outputs are empty strings, so -GhcrReference and the OSS
+      # coordinates simply arrive blank when those legs are off -- which is fine,
+      # since the notes do not print them.
+      #
+      # It also attaches the archive itself, which is the only retrieval path that
+      # is a plain URL a browser can follow.
       #
       # UPSTREAM_TAG comes from the Package step via GITHUB_ENV and drives the LGPL
       # corresponding-source link. It is the upstream tag this fork is based on, not
@@ -442,9 +456,10 @@ jobs:
           & src-linux\.github\scripts\publish-oss.ps1 -Archive $env:ARCHIVE `
             -Platform linux-amd64 -Mode $env:MODE -Version $env:VERSION
 
+      # Off unless OCCT_PUBLISH_GHCR is 'true'. See the windows-x64 job for why.
       - name: Publish to GitHub Packages
         id: ghcr
-        if: startsWith(github.ref, 'refs/tags/') || inputs.publish
+        if: (startsWith(github.ref, 'refs/tags/') || inputs.publish) && vars.OCCT_PUBLISH_GHCR == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DOCKER_HOST: tcp://localhost:2375

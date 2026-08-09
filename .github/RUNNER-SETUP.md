@@ -395,27 +395,28 @@ while `D:` still has hundreds of gigabytes free.
 
 ## 7. Artifact publication (Aliyun OSS + GitHub Packages)
 
-**The archive is attached to the release.** It is also pushed to GHCR, and once the
-Aliyun side is provisioned it will go to OSS as well. The notes index all three.
+**The archive is attached to the release, and that is the only leg currently live.**
+GHCR is gated off and OSS is unprovisioned.
 
-| Destination | Role | What lands there |
-| --- | --- | --- |
-| GitHub Releases | retrieval, and the human-facing index | the archive as an attached asset, plus notes carrying a download link and its `sha256` |
-| GitHub Packages (GHCR) | scripted retrieval | an OCI image carrying the archive, plus a `catalog.json` of the OSS coordinates |
-| Aliyun OSS | system of record | the archive as an immutable content-addressed blob — **not provisioned yet** |
+| Destination | Role | What lands there | State |
+| --- | --- | --- | --- |
+| GitHub Releases | retrieval, and the human-facing index | the archive as an attached asset, plus notes carrying a download link and its `sha256` | **live** |
+| Aliyun OSS | system of record | the archive as an immutable content-addressed blob | not provisioned |
+| GitHub Packages (GHCR) | scripted retrieval | an OCI image carrying the archive, plus a `catalog.json` of the OSS coordinates | off by default |
 
 A release asset is the only one of the three that is a plain URL a browser can
 follow. GHCR speaks the OCI token handshake, so an anonymous manifest GET is 401 even
 for a public image and there is no link to publish; the OSS bucket is private, so
 retrieval there needs an Aliyun identity.
 
-OSS and GHCR run on a tag or on a manual run with **publish** ticked. The release
-notes are written on a tag only, because a manual run has no tag to attach them to.
+The OSS step runs on a tag or on a manual run with **publish** ticked; GHCR needs
+`OCCT_PUBLISH_GHCR=true` on top of that. The release notes are written on a tag only,
+because a manual run has no tag to attach them to.
 
 **The OSS leg is currently a no-op.** `publish-oss.ps1` exits 0 with a notice when
 `OCCT_OSS_ROLE_ARN` and `OCCT_OSS_OIDC_PROVIDER_ARN` are unset, so a tag build
-succeeds without Aliyun. Until the bucket and role exist, the release asset and the
-GHCR package are where the bytes land.
+succeeds without Aliyun. Until the bucket and role exist, the release asset is where
+the bytes land — the single copy, so do not delete one expecting another to remain.
 
 The notes themselves stay short on purpose: a download link and a `sha256` per
 artifact, plus the LGPL source pointer. Bucket names, object keys, GHCR references and
@@ -431,10 +432,11 @@ Two consequences worth stating plainly, since they change how you consume a buil
   `ossutil` needs an Aliyun identity. There is no anonymous path, and making one
   would mean an OCCT-owned bucket with a public-read prefix (see
   [Why coordinates, not links](#why-coordinates-not-links)).
-- Two copies of every archive now sit on GitHub — the release asset and the GHCR
-  layer — and neither expires on its own. A Debug tag is roughly 405 MB per copy
-  across both platforms. Prefer `everxyz-release-*` tags for anything kept around,
-  and delete old Debug pre-releases and their packages when they stop being useful.
+- The release asset is the only copy, and nothing expires it. A Debug tag is roughly
+  405 MB across both platforms. Prefer `everxyz-release-*` tags for anything kept
+  around, and delete old Debug pre-releases when they stop being useful — but delete
+  the release, not just the tag, and be aware you are deleting the only copy until OSS
+  is provisioned.
 
 This mirrors the `cad test` fixture publication in `D:\everxyz-CQ\code\Utopia`, and
 deliberately reuses its contract rather than inventing a parallel one — same
@@ -584,46 +586,40 @@ touches your Aliyun account, not this machine.
    a commit.
 
 Until those variables exist the OSS step **skips with a notice and the build still
-passes**, so this can ship before the Aliyun side is provisioned. The GitHub
-Packages step does not depend on them and works immediately.
+passes**, so this can ship before the Aliyun side is provisioned.
 
-### GitHub Packages, and the storage caveat
+### GitHub Packages, and why it is off
 
-GitHub Packages has no generic file registry — the formats are OCI, npm, NuGet,
-Maven and RubyGems — so the archive is wrapped in a `FROM scratch` OCI image. That
-needs no new tooling, since the runner already has a working Docker CLI and daemon
-for the Linux build; ORAS would have been another binary to vendor and pin.
+**The GHCR step is gated off.** It runs only when repository variable
+`OCCT_PUBLISH_GHCR` is exactly `true`, and that variable is not set. A tag build
+publishes the release asset and nothing to Packages.
 
-One package, `ghcr.io/everxyz/occt`, tagged `<version>-<platform>-<mode>`:
+It was on because it was, for a while, the only path that actually got you the bytes:
+the release notes had been reduced to coordinates and the OSS bucket does not exist,
+so `docker pull` was the whole story. Attaching the archive to the release replaced
+that, and running both left two copies of every archive on GitHub — roughly 405 MB
+per Debug tag across the two platforms — with nothing expiring either one. `packages:
+write` came off the workflow's `permissions` at the same time, since it was granting a
+write nothing performed.
 
-```bash
-docker pull ghcr.io/everxyz/occt:1.0.0-linux-amd64-release
-```
+`publish-ghcr.ps1` is kept rather than deleted, because the index-only mode is the
+shape this should eventually take: once OSS holds the blob, a few-KB pointer image is
+a reasonable thing to publish next to it. It cannot be switched on before then —
+`OCCT_GHCR_INDEX_ONLY=true` with no OSS object produces a `catalog.json` pointing at a
+blob that was never uploaded.
 
+To turn it back on, set `OCCT_PUBLISH_GHCR` to `true` and restore `packages: write` to
+the workflow's `permissions` block. What it then publishes: one package,
+`ghcr.io/everxyz/occt`, tagged `<version>-<platform>-<mode>`, built `FROM scratch`
+because GitHub Packages has no generic file registry (the formats are OCI, npm, NuGet,
+Maven and RubyGems) and the runner already has a Docker CLI and daemon for the Linux
+build, whereas ORAS would be another binary to vendor and pin.
 `org.opencontainers.image.source` is what attaches the package to this repository
-rather than leaving it orphaned at the org level. The OSS coordinates travel as
-`com.everxyz.occt.oss.*` labels and as a `/catalog.json` inside the image, so a
-consumer can resolve the blob from either.
+instead of leaving it orphaned at the org level, and the OSS coordinates travel both as
+`com.everxyz.occt.oss.*` labels and as `/catalog.json` inside the image.
 
-**The image carries the archive.** `docker pull` yields the binaries, because GHCR is
-currently the only retrieval path that works — an index-only image would point at an
-OSS blob that has not been published. Extract them with:
-
-```bash
-docker create --name occt-fetch ghcr.io/everxyz/occt:<tag> /x
-docker cp occt-fetch:/<archive>.tar.gz .
-docker rm occt-fetch
-```
-
-The image is `FROM scratch`, so it has no entrypoint and `docker create` insists on a
-command argument. `/x` is never executed — the container only ever serves as a
-filesystem to copy out of.
-
-The cost is the account's Packages quota, which nothing expires on its own (a Debug
-pair runs ~199 MB Windows + ~265 MB Linux per tag). Once OSS publication works, set
-repository variable `OCCT_GHCR_INDEX_ONLY` to `true` to go back to a pointer-only
-image holding just `catalog.json`. Old versions can be deleted from the Packages UI,
-or:
+Old versions can be deleted from the Packages UI, or with a token carrying
+`delete:packages`:
 
 ```bash
 gh api --method DELETE /orgs/everxyz/packages/container/occt/versions/<version-id>
@@ -631,7 +627,8 @@ gh api --method DELETE /orgs/everxyz/packages/container/occt/versions/<version-i
 
 ### Verifying it
 
-A manual run exercises OSS and GHCR without cutting a tag:
+A manual run exercises the OSS step without cutting a tag (and the GHCR step too, if
+`OCCT_PUBLISH_GHCR` is `true`):
 
 **Actions → everxyz Build → Run workflow**, targets `windows-x64`, **publish** ✔.
 

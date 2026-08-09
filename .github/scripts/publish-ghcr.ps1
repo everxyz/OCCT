@@ -18,13 +18,21 @@
 
     One package, many tags: ghcr.io/<owner>/occt:<version>-<platform>-<mode>.
 
+    NOT CALLED BY DEFAULT. The workflow step that invokes this is gated on
+    repository variable OCCT_PUBLISH_GHCR being 'true', and it is unset: the
+    release asset serves the download now, and publishing here as well meant two
+    copies of every archive on GitHub with nothing expiring either. Kept because
+    the index-only mode below is where this should end up once OSS holds the blob.
+    See section 7 of .github/RUNNER-SETUP.md.
+
     Storage note. By default the archive is baked into the image, so the package
     is self-contained and 'docker pull' actually yields the binaries. For a
     private repository that consumes the account's Packages storage quota, and a
     Debug pair is heavy (~199 MB Windows + ~265 MB Linux). Set
     OCCT_GHCR_INDEX_ONLY=true to push a few-KB pointer image instead, which keeps
     the package visible and the OSS coordinates discoverable while storing only
-    the catalog.
+    the catalog -- but only once OSS publication works, or the catalog points at
+    an object that was never uploaded.
 
 .OUTPUTS
     Writes 'ghcr_ref' to $GITHUB_OUTPUT and prints the pushed reference.
@@ -112,17 +120,14 @@ if (-not $tag) { $tag = 'latest' }
 if ($tag.Length -gt 128) { $tag = $tag.Substring(0, 128) }
 $reference = "${image}:${tag}"
 
-# Self-contained by default: 'docker pull' yields the binaries. GHCR is currently
-# the only retrieval path that works -- the OSS bucket and its RAM role are not
-# provisioned yet, so publish-oss.ps1 skips and there is nothing to point at. An
-# index-only image would then reference a blob that does not exist.
+# Self-contained by default: 'docker pull' yields the binaries. The alternative,
+# an index-only pointer image, cannot be used until OSS publication works -- the
+# bucket and its RAM role are not provisioned, so publish-oss.ps1 skips and the
+# catalog would reference a blob that does not exist.
 #
-# This does mean GitHub stores the bytes, which is the thing the release notes
-# deliberately stopped doing by attaching release assets. The distinction that
-# makes it acceptable: a GHCR package is authenticated by the same GitHub identity
-# that grants access to this private repository, so the audience is unchanged, and
-# it can be deleted without rewriting release history. Cost is the account's
-# Packages quota (a Debug pair is ~199 MB Windows + ~265 MB Linux).
+# Which is also why the step calling this is gated off entirely rather than
+# switched to index-only: with no OSS object there is no useful pointer to publish,
+# and baking the bytes duplicates what the release asset already serves.
 #
 # Set OCCT_GHCR_INDEX_ONLY=true once OSS publication works, to go back to a
 # pointer-only carrier image.
