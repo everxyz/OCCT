@@ -9,6 +9,15 @@
 # Deliberately uses no external actions: the repository's Actions policy is set to
 # allow only everxyz-owned actions, so actions/checkout and friends are blocked.
 # Checkout, archiving and release upload are done with git, tar and the REST API.
+#
+# Every host-side step runs in Windows PowerShell 5.1 ('shell: powershell'), which
+# is the only shell that actually works on this runner:
+#   - 'shell: bash' resolves through PATH to C:\Windows\System32\bash.exe, the WSL
+#     launcher. WSL distros are registered per-user and the runner's service account
+#     has none, so it exits immediately.
+#   - Naming Git Bash by absolute path in 'shell:' makes the runner fail with
+#     "Second path fragment must not be a drive or UNC name".
+#   - 'shell: pwsh' needs PowerShell Core, which is not installed here.
 
 name: everxyz Build
 
@@ -39,11 +48,7 @@ concurrency:
 
 defaults:
   run:
-    # 'shell: bash' resolves via PATH, where C:\Windows\System32\bash.exe (the WSL
-    # launcher) wins on this runner. WSL distros are registered per-user and none
-    # exist for the service account, so that bash fails immediately. Point at Git
-    # Bash explicitly. -e and -o pipefail match what 'shell: bash' would apply.
-    shell: 'C:\Program Files\Git\bin\bash.exe -eo pipefail {0}'
+    shell: powershell
 
 jobs:
   setup:
@@ -58,43 +63,46 @@ jobs:
     steps:
       - name: Resolve mode and version from tag
         id: resolve
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_MODE: ${{ inputs.build_mode }}
+          INPUT_TARGETS: ${{ inputs.targets }}
         run: |
-          set -euo pipefail
-          ref='${{ github.ref_name }}'
+          $ErrorActionPreference = 'Stop'
+          $ref = $env:REF_NAME
 
-          case "$ref" in
-            everxyz-release-*) mode=Release; version="${ref#everxyz-release-}" ;;
-            everxyz-dev-*)     mode=Debug;   version="${ref#everxyz-dev-}" ;;
-            *)
-              # workflow_dispatch on a branch: fall back to the chosen input.
-              mode='${{ inputs.build_mode }}'
-              mode="${mode:-Release}"
-              version="manual-${GITHUB_SHA::8}"
-              ;;
-          esac
+          if ($ref -like 'everxyz-release-*') {
+            $mode = 'Release'; $version = $ref.Substring('everxyz-release-'.Length)
+          } elseif ($ref -like 'everxyz-dev-*') {
+            $mode = 'Debug';   $version = $ref.Substring('everxyz-dev-'.Length)
+          } else {
+            # workflow_dispatch on a branch: fall back to the chosen input.
+            $mode = if ($env:INPUT_MODE) { $env:INPUT_MODE } else { 'Release' }
+            $version = "manual-$($env:GITHUB_SHA.Substring(0,8))"
+          }
 
-          want='${{ inputs.targets }}'
-          case "${want:-both}" in
-            windows-x64) win=true;  lnx=false ;;
-            linux-amd64) win=false; lnx=true  ;;
-            *)           win=true;  lnx=true  ;;
-          esac
+          $want = if ($env:INPUT_TARGETS) { $env:INPUT_TARGETS } else { 'both' }
+          switch ($want) {
+            'windows-x64' { $win = 'true';  $lnx = 'false' }
+            'linux-amd64' { $win = 'false'; $lnx = 'true'  }
+            default       { $win = 'true';  $lnx = 'true'  }
+          }
 
-          {
-            echo "mode=$mode"
-            echo "version=$version"
-            echo "build_windows=$win"
-            echo "build_linux=$lnx"
-          } >> "$GITHUB_OUTPUT"
+          @(
+            "mode=$mode"
+            "version=$version"
+            "build_windows=$win"
+            "build_linux=$lnx"
+          ) | Add-Content -LiteralPath $env:GITHUB_OUTPUT
 
-          {
-            echo "## everxyz build"
-            echo "- tag/ref: \`$ref\`"
-            echo "- mode: **$mode**"
-            echo "- version: \`$version\`"
-            echo "- windows-x64: $win"
-            echo "- linux-amd64: $lnx"
-          } >> "$GITHUB_STEP_SUMMARY"
+          @(
+            '## everxyz build'
+            "- tag/ref: ``$ref``"
+            "- mode: **$mode**"
+            "- version: ``$version``"
+            "- windows-x64: $win"
+            "- linux-amd64: $lnx"
+          ) | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
 
   windows-x64:
     name: Windows x64 (${{ needs.setup.outputs.mode }})
@@ -106,16 +114,23 @@ jobs:
       VERSION: ${{ needs.setup.outputs.version }}
     steps:
       - name: Checkout at ref
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euo pipefail
-          rm -rf src-win && mkdir src-win && cd src-win
-          git init --quiet
-          git remote add origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git"
-          git fetch --quiet --depth 1 origin "${GITHUB_SHA}"
-          git checkout --quiet FETCH_HEAD
+          $ErrorActionPreference = 'Stop'
+          if (Test-Path src-win) { Remove-Item src-win -Recurse -Force }
+          New-Item -ItemType Directory -Path src-win | Out-Null
+          Push-Location src-win
+          try {
+            git init --quiet
+            git remote add origin "https://x-access-token:$env:TOKEN@github.com/$env:GITHUB_REPOSITORY.git"
+            git fetch --quiet --depth 1 origin $env:GITHUB_SHA
+            if ($LASTEXITCODE -ne 0) { throw "git fetch failed ($LASTEXITCODE)" }
+            git checkout --quiet FETCH_HEAD
+            if ($LASTEXITCODE -ne 0) { throw "git checkout failed ($LASTEXITCODE)" }
+          } finally { Pop-Location }
 
       - name: Configure
-        shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           cmake -S src-win -B build-win -G "Visual Studio 17 2022" -A x64 `
@@ -131,7 +146,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build and install
-        shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           cmake --build build-win --target install --config $env:MODE --parallel
@@ -139,17 +153,22 @@ jobs:
 
       - name: Package
         run: |
-          set -euo pipefail
-          name="occt-${VERSION}-windows-x64-$(echo "$MODE" | tr '[:upper:]' '[:lower:]')"
-          tar -czf "${name}.tar.gz" -C install-win .
-          echo "Created ${name}.tar.gz ($(du -h "${name}.tar.gz" | cut -f1))"
-          echo "ARCHIVE=${name}.tar.gz" >> "$GITHUB_ENV"
+          $ErrorActionPreference = 'Stop'
+          $name = "occt-$env:VERSION-windows-x64-$($env:MODE.ToLower())"
+          $archive = "$name.tar.gz"
+          tar -czf $archive -C install-win .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $sizeMb = [math]::Round((Get-Item $archive).Length / 1MB, 1)
+          Write-Host "Created $archive ($sizeMb MB)"
+          "ARCHIVE=$archive" | Add-Content -LiteralPath $env:GITHUB_ENV
 
       - name: Upload to release
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: bash src-win/.github/scripts/upload-release-asset.sh "$ARCHIVE"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & src-win\.github\scripts\upload-release-asset.ps1 $env:ARCHIVE
 
   linux-amd64:
     name: Linux amd64 (${{ needs.setup.outputs.mode }})
@@ -161,13 +180,21 @@ jobs:
       VERSION: ${{ needs.setup.outputs.version }}
     steps:
       - name: Checkout at ref
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euo pipefail
-          rm -rf src-linux && mkdir src-linux && cd src-linux
-          git init --quiet
-          git remote add origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git"
-          git fetch --quiet --depth 1 origin "${GITHUB_SHA}"
-          git checkout --quiet FETCH_HEAD
+          $ErrorActionPreference = 'Stop'
+          if (Test-Path src-linux) { Remove-Item src-linux -Recurse -Force }
+          New-Item -ItemType Directory -Path src-linux | Out-Null
+          Push-Location src-linux
+          try {
+            git init --quiet
+            git remote add origin "https://x-access-token:$env:TOKEN@github.com/$env:GITHUB_REPOSITORY.git"
+            git fetch --quiet --depth 1 origin $env:GITHUB_SHA
+            if ($LASTEXITCODE -ne 0) { throw "git fetch failed ($LASTEXITCODE)" }
+            git checkout --quiet FETCH_HEAD
+            if ($LASTEXITCODE -ne 0) { throw "git checkout failed ($LASTEXITCODE)" }
+          } finally { Pop-Location }
 
       - name: Build in amd64 container
         env:
@@ -177,54 +204,74 @@ jobs:
           # Requires "Expose daemon on tcp://localhost:2375" in Docker Desktop.
           DOCKER_HOST: tcp://localhost:2375
         run: |
-          set -euo pipefail
-          rm -rf install-linux
+          $ErrorActionPreference = 'Stop'
+          if (Test-Path install-linux) { Remove-Item install-linux -Recurse -Force }
 
-          docker version --format 'daemon {{.Server.Version}}' >/dev/null || {
-            echo "::error::Cannot reach the Docker daemon on ${DOCKER_HOST}."
-            echo "Enable 'Expose daemon on tcp://localhost:2375 without TLS' in"
-            echo "Docker Desktop settings, and make sure Docker Desktop is running."
+          docker version --format 'daemon {{.Server.Version}}' | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::Cannot reach the Docker daemon on $env:DOCKER_HOST."
+            Write-Host "Enable 'Expose daemon on tcp://localhost:2375 without TLS' in"
+            Write-Host "Docker Desktop settings, and make sure Docker Desktop is running."
             exit 1
           }
 
-          # MSYS_NO_PATHCONV stops Git Bash rewriting the container-side paths in -v.
-          export MSYS_NO_PATHCONV=1
+          # The build script is written to disk with LF endings and mounted, rather
+          # than passed via 'bash -c'. PowerShell 5.1 truncates arguments containing
+          # embedded newlines when invoking a native program, so an inline script
+          # silently reaches the container as its first line only.
+          $build = @(
+            'set -eo pipefail'
+            'export DEBIAN_FRONTEND=noninteractive'
+            'apt-get update -qq'
+            'apt-get install -y -qq --no-install-recommends \'
+            '  build-essential cmake libx11-dev libxext-dev libxmu-dev libxi-dev \'
+            '  libgl1-mesa-dev libglu1-mesa-dev tcl-dev tk-dev'
+            'cmake -S /src -B /tmp/build -G "Unix Makefiles" \'
+            '  -D CMAKE_BUILD_TYPE="$MODE" \'
+            '  -D BUILD_LIBRARY_TYPE=Shared \'
+            '  -D BUILD_CPP_STANDARD=C++17 \'
+            '  -D BUILD_MODULE_Draw=OFF \'
+            '  -D BUILD_DOC_Overview=OFF \'
+            '  -D USE_FREETYPE=OFF \'
+            '  -D USE_TK=OFF \'
+            '  -D USE_OPENGL=ON \'
+            '  -D INSTALL_DIR=/tmp/install'
+            'cmake --build /tmp/build --target install -- -j"$(nproc)"'
+            'cp -a /tmp/install /out/install-linux'
+          ) -join "`n"
+
+          # Docker needs Windows-style host paths, which (Get-Location).Path gives.
+          $here = (Get-Location).Path
+          $scriptPath = Join-Path $here 'container-build.sh'
+          [System.IO.File]::WriteAllText($scriptPath, $build + "`n",
+                                         (New-Object System.Text.UTF8Encoding($false)))
 
           # Native x86_64 build: the runner host is amd64, so no emulation.
-          docker run --rm --platform linux/amd64 \
-            -v "$(pwd -W 2>/dev/null || pwd)/src-linux:/src:ro" \
-            -v "$(pwd -W 2>/dev/null || pwd):/out" \
-            -e MODE="$MODE" \
-            ubuntu:22.04 bash -euo pipefail -c '
-              export DEBIAN_FRONTEND=noninteractive
-              apt-get update -qq
-              apt-get install -y -qq --no-install-recommends \
-                build-essential cmake libx11-dev libxext-dev libxmu-dev libxi-dev \
-                libgl1-mesa-dev libglu1-mesa-dev tcl-dev tk-dev
-              cmake -S /src -B /tmp/build -G "Unix Makefiles" \
-                -D CMAKE_BUILD_TYPE="$MODE" \
-                -D BUILD_LIBRARY_TYPE=Shared \
-                -D BUILD_CPP_STANDARD=C++17 \
-                -D BUILD_MODULE_Draw=OFF \
-                -D BUILD_DOC_Overview=OFF \
-                -D USE_FREETYPE=OFF \
-                -D USE_TK=OFF \
-                -D USE_OPENGL=ON \
-                -D INSTALL_DIR=/tmp/install
-              cmake --build /tmp/build --target install -- -j"$(nproc)"
-              cp -a /tmp/install /out/install-linux
-            '
+          & docker @(
+            'run','--rm','--platform','linux/amd64',
+            '-v', "${here}\src-linux:/src:ro",
+            '-v', "${here}:/out",
+            '-v', "${scriptPath}:/build.sh:ro",
+            '-e', "MODE=$env:MODE",
+            'ubuntu:22.04','bash','/build.sh'
+          )
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Package
         run: |
-          set -euo pipefail
-          name="occt-${VERSION}-linux-amd64-$(echo "$MODE" | tr '[:upper:]' '[:lower:]')"
-          tar -czf "${name}.tar.gz" -C install-linux .
-          echo "Created ${name}.tar.gz ($(du -h "${name}.tar.gz" | cut -f1))"
-          echo "ARCHIVE=${name}.tar.gz" >> "$GITHUB_ENV"
+          $ErrorActionPreference = 'Stop'
+          $name = "occt-$env:VERSION-linux-amd64-$($env:MODE.ToLower())"
+          $archive = "$name.tar.gz"
+          tar -czf $archive -C install-linux .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $sizeMb = [math]::Round((Get-Item $archive).Length / 1MB, 1)
+          Write-Host "Created $archive ($sizeMb MB)"
+          "ARCHIVE=$archive" | Add-Content -LiteralPath $env:GITHUB_ENV
 
       - name: Upload to release
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: bash src-linux/.github/scripts/upload-release-asset.sh "$ARCHIVE"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & src-linux\.github\scripts\upload-release-asset.ps1 $env:ARCHIVE
