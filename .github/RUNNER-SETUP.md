@@ -143,11 +143,13 @@ Be aware of the tradeoff: 2375 is plaintext and unauthenticated. It binds only t
 not reachable from the network — but any local process can use it to control Docker,
 which is equivalent to root on this machine.
 
-Docker Desktop also has to be **running** when a build starts, and `AutoStart` is
-currently `false`, so it does not come back by itself after a reboot. Either enable
-"Start Docker Desktop when you sign in" in its settings, or start it manually before
-tagging a release. The job fails with an explicit message if the daemon is unreachable
-rather than emitting a confusing `docker run` error.
+Docker Desktop also has to be **running** when a build starts. `AutoStart` is enabled
+(equivalent to "Start Docker Desktop when you sign in"), so it returns after a reboot —
+but only once **`sxd` signs in**, because that setting lives in that user's profile and
+the GUI runs in their session. A reboot that sits at the login screen leaves the daemon
+down and Linux builds failing, so sign in before tagging a release. The job fails with
+an explicit message if the daemon is unreachable rather than emitting a confusing
+`docker run` error.
 
 ### Why the job does not use the CLI on PATH
 
@@ -215,33 +217,42 @@ git tag everxyz-dev-1.0.0 && git push origin everxyz-dev-1.0.0
 Both targets build natively on this host — no emulation, since host and target are
 both x86_64.
 
+The host has 14 cores / 20 threads and 31.7 GB of RAM.
+
 The Windows job uses `--parallel` and gets all 20 threads. The Linux job passes
-`-j$(nproc)`, but it runs inside Docker Desktop's WSL2 VM, which is currently capped
-by `C:\Users\sxd\.wslconfig`:
+`-j$(nproc)`, but it runs inside Docker Desktop's WSL2 VM, which is capped by
+`C:\Users\sxd\.wslconfig`:
 
 ```ini
 [wsl2]
-processors=8
+processors=12
 memory=16GB
 ```
 
-So the Linux build sees 8 threads, not 20. To give it more, raise `processors` there
-and run `wsl --shutdown` (this affects all WSL distros and Docker Desktop, so it is
-left as your call rather than changed by the build):
+So the Linux build sees 12 threads, leaving 8 for the Windows side and interactive use.
+Changing these values affects **all** WSL distros and Docker Desktop, not just this
+build, and only takes effect after the VM is restarted:
 
 ```powershell
 wsl --shutdown
 ```
 
+Memory was deliberately left at 16 GB. Twelve parallel `g++` processes on a Debug build
+are memory-hungry, so if the Linux job starts dying with OOM kills or `cc1plus: out of
+memory`, raise `memory` before lowering `processors` — but the host only has 31.7 GB
+total and Docker's VM is not the only thing using it.
+
 Confirm what the container actually sees:
 
 ```powershell
-docker run --rm --platform linux/amd64 ubuntu:22.04 nproc
-``` The two jobs are
-independent and GitHub will run them concurrently if the runner allows more than one
-job at a time; by default a single runner takes one job at a time, so they will
-queue. Register a second runner on the same machine if you want them in parallel —
-though with both competing for the same cores there is little to gain.
+F:\actions-runner\tools\docker.exe run --rm --platform linux/amd64 ubuntu:22.04 nproc
+```
+
+The two jobs are independent, but a single runner takes one job at a time, so they
+queue rather than overlap. Measured on a `everxyz-dev-*` (Debug) tag, back when the
+Linux side still had 8 threads: Windows 11 min, Linux 23 min, about 34 min wall clock
+for the pair. Release builds are quicker. Registering a second runner on this machine
+would let them overlap, but both would then compete for the same cores.
 
 ## Maintenance
 
