@@ -204,6 +204,29 @@ jobs:
           Write-Host "Created $archive ($sizeMb MB)"
           "ARCHIVE=$archive" | Add-Content -LiteralPath $env:GITHUB_ENV
 
+          # Corresponding-source pointer for the release notes. OCCT is LGPL-2.1,
+          # so distributing these binaries obliges us to say where the matching
+          # source is. This fork changes nothing under src/, so the upstream tag
+          # for the version in adm/cmake/version.cmake IS that source.
+          #
+          # Read from the tree rather than 'git describe': the checkout is shallow
+          # and carries no tags. Anchored on 'set (' so the explanatory comment
+          # block at the top of version.cmake cannot match first.
+          $vf = Get-Content -LiteralPath src-win\adm\cmake\version.cmake -Raw
+          $maj = [regex]::Match($vf, 'set\s*\(\s*OCC_VERSION_MAJOR\s+(\d+)').Groups[1].Value
+          $min = [regex]::Match($vf, 'set\s*\(\s*OCC_VERSION_MINOR\s+(\d+)').Groups[1].Value
+          $mnt = [regex]::Match($vf, 'set\s*\(\s*OCC_VERSION_MAINTENANCE\s+(\d+)').Groups[1].Value
+          # Absent in a release tree; present ('dev', 'rc1', 'p1') between releases,
+          # where it becomes part of the tag name as in V8_0_0_p1.
+          $dev = [regex]::Match($vf, 'set\s*\(\s*OCC_VERSION_DEVELOPMENT\s+"?([^"\s\)]*)"?').Groups[1].Value
+          $upstreamTag = ''
+          if ($maj -and $min -and $mnt) {
+            $upstreamTag = "V${maj}_${min}_${mnt}"
+            if ($dev) { $upstreamTag = "${upstreamTag}_$dev" }
+          }
+          Write-Host "Upstream tag: $(if ($upstreamTag) { $upstreamTag } else { '(undetermined)' })"
+          "UPSTREAM_TAG=$upstreamTag" | Add-Content -LiteralPath $env:GITHUB_ENV
+
       - name: Publish to Aliyun OSS
         id: oss
         if: startsWith(github.ref, 'refs/tags/') || inputs.publish
@@ -219,22 +242,8 @@ jobs:
           & src-win\.github\scripts\publish-oss.ps1 -Archive $env:ARCHIVE `
             -Platform windows-x64 -Mode $env:MODE -Version $env:VERSION
 
-      # After the OSS step, not before: this records that step's coordinates. The
-      # release carries no assets -- GitHub does not host the binaries.
-      - name: Record artifact in release
-        if: startsWith(github.ref, 'refs/tags/')
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          & src-win\.github\scripts\upload-release-asset.ps1 $env:ARCHIVE `
-            -Bucket '${{ steps.oss.outputs.oss_bucket }}' `
-            -ObjectKey '${{ steps.oss.outputs.oss_object_key }}' `
-            -Sha256 '${{ steps.oss.outputs.oss_sha256 }}' `
-            -Region '${{ steps.oss.outputs.oss_region }}' `
-            -Endpoint '${{ steps.oss.outputs.oss_endpoint }}'
-
       - name: Publish to GitHub Packages
+        id: ghcr
         if: startsWith(github.ref, 'refs/tags/') || inputs.publish
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -250,6 +259,29 @@ jobs:
             -OssBucket '${{ steps.oss.outputs.oss_bucket }}' `
             -OssObjectKey '${{ steps.oss.outputs.oss_object_key }}' `
             -Sha256 '${{ steps.oss.outputs.oss_sha256 }}'
+
+      # Last of the three, because it indexes the other two: it records the OSS
+      # coordinates and the GHCR reference, so both have to have run. Nothing is
+      # attached to the release -- the notes are an index over the real stores.
+      #
+      # UPSTREAM_TAG comes from the Package step via GITHUB_ENV and drives the LGPL
+      # corresponding-source link. It is the upstream tag this fork is based on, not
+      # the everxyz release tag: we distribute unmodified library binaries, so it is
+      # upstream's tarball that is the matching source.
+      - name: Record artifact in release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & src-win\.github\scripts\upload-release-asset.ps1 $env:ARCHIVE `
+            -Bucket '${{ steps.oss.outputs.oss_bucket }}' `
+            -ObjectKey '${{ steps.oss.outputs.oss_object_key }}' `
+            -Sha256 '${{ steps.oss.outputs.oss_sha256 }}' `
+            -Region '${{ steps.oss.outputs.oss_region }}' `
+            -Endpoint '${{ steps.oss.outputs.oss_endpoint }}' `
+            -GhcrReference '${{ steps.ghcr.outputs.ghcr_ref }}' `
+            -UpstreamTag $env:UPSTREAM_TAG
 
   linux-amd64:
     name: Linux amd64 (${{ needs.setup.outputs.mode }})
@@ -381,6 +413,20 @@ jobs:
           Write-Host "Created $archive ($sizeMb MB)"
           "ARCHIVE=$archive" | Add-Content -LiteralPath $env:GITHUB_ENV
 
+          # See the windows-x64 job for why this is read from the tree.
+          $vf = Get-Content -LiteralPath src-linux\adm\cmake\version.cmake -Raw
+          $maj = [regex]::Match($vf, 'set\s*\(\s*OCC_VERSION_MAJOR\s+(\d+)').Groups[1].Value
+          $min = [regex]::Match($vf, 'set\s*\(\s*OCC_VERSION_MINOR\s+(\d+)').Groups[1].Value
+          $mnt = [regex]::Match($vf, 'set\s*\(\s*OCC_VERSION_MAINTENANCE\s+(\d+)').Groups[1].Value
+          $dev = [regex]::Match($vf, 'set\s*\(\s*OCC_VERSION_DEVELOPMENT\s+"?([^"\s\)]*)"?').Groups[1].Value
+          $upstreamTag = ''
+          if ($maj -and $min -and $mnt) {
+            $upstreamTag = "V${maj}_${min}_${mnt}"
+            if ($dev) { $upstreamTag = "${upstreamTag}_$dev" }
+          }
+          Write-Host "Upstream tag: $(if ($upstreamTag) { $upstreamTag } else { '(undetermined)' })"
+          "UPSTREAM_TAG=$upstreamTag" | Add-Content -LiteralPath $env:GITHUB_ENV
+
       - name: Publish to Aliyun OSS
         id: oss
         if: startsWith(github.ref, 'refs/tags/') || inputs.publish
@@ -393,22 +439,8 @@ jobs:
           & src-linux\.github\scripts\publish-oss.ps1 -Archive $env:ARCHIVE `
             -Platform linux-amd64 -Mode $env:MODE -Version $env:VERSION
 
-      # After the OSS step, not before: this records that step's coordinates. The
-      # release carries no assets -- GitHub does not host the binaries.
-      - name: Record artifact in release
-        if: startsWith(github.ref, 'refs/tags/')
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          & src-linux\.github\scripts\upload-release-asset.ps1 $env:ARCHIVE `
-            -Bucket '${{ steps.oss.outputs.oss_bucket }}' `
-            -ObjectKey '${{ steps.oss.outputs.oss_object_key }}' `
-            -Sha256 '${{ steps.oss.outputs.oss_sha256 }}' `
-            -Region '${{ steps.oss.outputs.oss_region }}' `
-            -Endpoint '${{ steps.oss.outputs.oss_endpoint }}'
-
       - name: Publish to GitHub Packages
+        id: ghcr
         if: startsWith(github.ref, 'refs/tags/') || inputs.publish
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -422,3 +454,20 @@ jobs:
             -OssBucket '${{ steps.oss.outputs.oss_bucket }}' `
             -OssObjectKey '${{ steps.oss.outputs.oss_object_key }}' `
             -Sha256 '${{ steps.oss.outputs.oss_sha256 }}'
+
+      # Last of the three, because it indexes the other two. See the windows-x64
+      # job for why, and for what UPSTREAM_TAG is.
+      - name: Record artifact in release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & src-linux\.github\scripts\upload-release-asset.ps1 $env:ARCHIVE `
+            -Bucket '${{ steps.oss.outputs.oss_bucket }}' `
+            -ObjectKey '${{ steps.oss.outputs.oss_object_key }}' `
+            -Sha256 '${{ steps.oss.outputs.oss_sha256 }}' `
+            -Region '${{ steps.oss.outputs.oss_region }}' `
+            -Endpoint '${{ steps.oss.outputs.oss_endpoint }}' `
+            -GhcrReference '${{ steps.ghcr.outputs.ghcr_ref }}' `
+            -UpstreamTag $env:UPSTREAM_TAG

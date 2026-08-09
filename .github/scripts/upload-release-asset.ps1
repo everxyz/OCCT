@@ -46,7 +46,20 @@ param(
     [string] $ObjectKey = '',
     [string] $Sha256 = '',
     [string] $Region = '',
-    [string] $Endpoint = ''
+    [string] $Endpoint = '',
+
+    # GHCR reference carrying the same artifact, e.g.
+    # ghcr.io/everxyz/occt:8.0.1-windows-x64-release. Recorded as a retrieval path
+    # in its own right: while OSS is unprovisioned this is the only one that works,
+    # and it is authenticated by the same GitHub identity that grants access to
+    # this repository, so anyone who can read the repository can fetch it.
+    [string] $GhcrReference = '',
+
+    # Upstream tag the libraries were built from, e.g. V8_0_1. Drives the LGPL
+    # corresponding-source link: OCCT is LGPL-2.1 with the Open CASCADE exception,
+    # and distributing the binaries obliges us to say where the matching source is.
+    # This fork modifies nothing under src/, so upstream's tarball IS that source.
+    [string] $UpstreamTag = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -102,18 +115,37 @@ function Get-ReleaseByTag {
     }
 }
 
-# The preamble explains, once per release, why there is nothing to click. Kept
-# separate from the per-artifact sections so appending never duplicates it.
+# The preamble states, once per release, where the bytes are and under what licence
+# they are distributed. Kept separate from the per-artifact sections so appending
+# never duplicates it.
 $preambleMarker = '<!-- everxyz:preamble -->'
-$preamble = @(
-    $preambleMarker
-    '> **Binaries are not hosted on GitHub.** The bytes of record live in Aliyun OSS as'
-    '> content-addressed blobs. Each artifact below carries its bucket, object key and'
-    '> plaintext `sha256`, plus a command to fetch it.'
-    '>'
-    '> The bucket is private, so these are coordinates rather than clickable links. You'
-    '> need read access on it and either `ossutil` or the `aliyun` CLI configured.'
-) -join "`n"
+$preambleLines = [System.Collections.Generic.List[string]]::new()
+$preambleLines.Add($preambleMarker)
+$preambleLines.Add('> **Nothing is attached to this release.** Each artifact below says how to fetch')
+$preambleLines.Add('> it, and carries the `sha256` of the plaintext archive so you can verify it.')
+$preambleLines.Add('>')
+$preambleLines.Add('> The `ghcr.io` packages carry the bytes. They authenticate against GitHub, so')
+$preambleLines.Add('> read access to this repository is already read access to the artifacts and')
+$preambleLines.Add('> there is no second credential to hand out.')
+$preambleLines.Add('>')
+$preambleLines.Add('> Aliyun OSS is the intended store of record. Where an artifact lists a bucket')
+$preambleLines.Add('> and object key, that blob is content-addressed and immutable; the bucket is')
+$preambleLines.Add('> private, so those are coordinates rather than links and need `ossutil` or the')
+$preambleLines.Add('> `aliyun` CLI.')
+
+# LGPL-2.1 section 4 lets an object-code distributor satisfy the source obligation
+# by offering equivalent access to the source from the same place. This fork changes
+# nothing under src/, so upstream's own tarball for the same tag IS the corresponding
+# source, and pointing at it discharges the obligation without publishing anything
+# from this private repository. If a patch to src/ ever lands, that stops being true
+# and section 2(a) starts to apply: the modified source has to be offered too.
+if ($UpstreamTag) {
+    $preambleLines.Add('>')
+    $preambleLines.Add("> Built from unmodified upstream OCCT ``$UpstreamTag`` as shared libraries, under")
+    $preambleLines.Add('> LGPL-2.1 with the Open CASCADE exception. Corresponding source:')
+    $preambleLines.Add("> https://github.com/Open-Cascade-SAS/OCCT/archive/refs/tags/$UpstreamTag.tar.gz")
+}
+$preamble = ($preambleLines -join "`n")
 
 if (-not (Get-ReleaseByTag)) {
     Write-Host "Creating release $tag"
@@ -150,28 +182,63 @@ $lines.Add($marker)
 $lines.Add("### ``$assetName``")
 $lines.Add('')
 $lines.Add("- size: $sizeMb MB")
-$lines.Add("- sha256 (plaintext, before gzip transport encoding): ``$Sha256``")
+# The gzip caveat applies only to the OSS blob, which is re-encoded in transport.
+# The GHCR package carries the archive as-is, so claiming a transport encoding that
+# is not there would send a reader looking for a layer to strip.
+if ($ObjectKey -and $Bucket) {
+    $lines.Add("- sha256 (plaintext, before gzip transport encoding): ``$Sha256``")
+} else {
+    $lines.Add("- sha256: ``$Sha256``")
+}
 
+if ($GhcrReference) {
+    $lines.Add("- package: ``$GhcrReference``")
+}
 if ($ObjectKey -and $Bucket) {
     $regionNote = if ($Region) { " (``$Region``)" } else { '' }
     $lines.Add("- bucket: ``$Bucket``$regionNote")
     $lines.Add("- object key: ``$ObjectKey``")
+}
+
+# GHCR first: while OSS is unprovisioned it is the only path that works, and even
+# once OSS exists it stays the one that needs no second credential.
+if ($GhcrReference) {
     $lines.Add('')
-    $lines.Add('Fetch it:')
+    $lines.Add('Fetch it from GitHub Packages:')
     $lines.Add('')
     $lines.Add('```bash')
-    # One line, no backslash continuations: this is meant to be copy-pasted, and a
-    # wrapped line breaks when pasted into PowerShell.
+    # One command per line, no backslash continuations: these are meant to be
+    # copy-pasted, and a wrapped line breaks when pasted into PowerShell.
+    $lines.Add('gh auth token | docker login ghcr.io -u "$(gh api user --jq .login)" --password-stdin')
+    $lines.Add("docker create --name occt-fetch $GhcrReference /x > /dev/null")
+    $lines.Add("docker cp occt-fetch:/$assetName ./$assetName")
+    $lines.Add('docker rm occt-fetch > /dev/null')
+    $lines.Add('```')
+    $lines.Add('')
+    # 'FROM scratch' has no entrypoint, so 'docker create' needs a command argument
+    # to accept the image at all. It is never executed -- the container is only ever
+    # a filesystem to copy out of -- so '/x' not existing is harmless.
+    $lines.Add('The image is `FROM scratch` and holds only the archive plus a')
+    $lines.Add('`catalog.json`. The `/x` argument is never run; `docker create` just')
+    $lines.Add('requires one.')
+}
+
+if ($ObjectKey -and $Bucket) {
+    $lines.Add('')
+    $lines.Add('Or from Aliyun OSS:')
+    $lines.Add('')
+    $lines.Add('```bash')
     $endpointArg = if ($Endpoint) { " --endpoint $Endpoint" } else { '' }
     $lines.Add("ossutil cp oss://$Bucket/$ObjectKey ./$assetName$endpointArg")
     $lines.Add('```')
     $lines.Add('')
-    $lines.Add('Stored gzip-encoded, so decode before verifying: the `sha256` above')
-    $lines.Add('covers the plaintext archive.')
+    $lines.Add('That blob is stored gzip-encoded, so decode it before verifying: the')
+    $lines.Add('`sha256` above covers the plaintext archive.')
 } else {
     $lines.Add('')
-    $lines.Add('> Not yet published to OSS: Aliyun RAM federation is not configured for')
-    $lines.Add('> this repository. See `.github/RUNNER-SETUP.md` section 7.')
+    $lines.Add('> Not published to Aliyun OSS: the bucket and its RAM role are not')
+    $lines.Add('> provisioned yet, so this run had nowhere to put the blob. The GHCR')
+    $lines.Add('> package above carries the same bytes and the same `sha256`.')
 }
 
 $lines.Add($endMark)

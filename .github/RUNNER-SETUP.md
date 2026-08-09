@@ -395,27 +395,34 @@ while `D:` still has hundreds of gigabytes free.
 
 ## 7. Artifact publication (Aliyun OSS + GitHub Packages)
 
-**GitHub does not host the binaries.** Aliyun OSS holds the bytes; everything on
-GitHub is an index over them.
+**Nothing is attached to a release.** The bytes live in a GHCR package and, once the
+Aliyun side is provisioned, in an OSS blob as well. The release notes are an index
+over both.
 
 | Destination | Role | What lands there |
 | --- | --- | --- |
-| Aliyun OSS | system of record | the archive as an immutable content-addressed blob |
-| GitHub Packages (GHCR) | discovery | a few-KB OCI image recording the OSS coordinates |
-| GitHub Releases | human-facing index | notes carrying bucket, object key, `sha256` and a fetch command — **no attached files** |
+| GitHub Packages (GHCR) | retrieval | an OCI image carrying the archive, plus a `catalog.json` of the OSS coordinates |
+| Aliyun OSS | system of record | the archive as an immutable content-addressed blob — **not provisioned yet** |
+| GitHub Releases | human-facing index | notes carrying `sha256`, the GHCR reference, the OSS coordinates when present, and fetch commands — **no attached files** |
 
 OSS and GHCR run on a tag or on a manual run with **publish** ticked. The release
 notes are written on a tag only, because a manual run has no tag to attach them to.
 
+**The OSS leg is currently a no-op.** `publish-oss.ps1` exits 0 with a notice when
+`OCCT_OSS_ROLE_ARN` and `OCCT_OSS_OIDC_PROVIDER_ARN` are unset, so a tag build
+succeeds without Aliyun. Until the bucket and role exist, GHCR is the only place the
+bytes land, and the release notes say so per artifact instead of pointing at a blob
+that is not there.
+
 Two consequences worth stating plainly, since they change how you consume a build:
 
-- There is nothing to click on the Releases page. The bucket is private with
-  block-public-access on, so a URL would either not work or expire within the hour
-  (see [Why coordinates, not links](#why-coordinates-not-links)).
-- `docker pull` gives you the coordinates, not the binaries. That is deliberate:
-  baking the archive into the carrier image would put the bytes back on GitHub's
-  storage by another route. Set `OCCT_GHCR_INDEX_ONLY=false` if you want the
-  self-contained image instead.
+- There is nothing to click on the Releases page. Retrieval is `docker pull` (GitHub
+  credentials) or `ossutil` (Aliyun credentials), not a browser download. The OSS
+  bucket is private with block-public-access on, so a URL would either not work or
+  expire within the hour (see [Why coordinates, not links](#why-coordinates-not-links)).
+- GHCR read access is GitHub read access. The package authenticates against the same
+  identity that grants access to this repository, so anyone who can read the repo can
+  fetch the artifacts with no second credential to issue.
 
 This mirrors the `cad test` fixture publication in `D:\everxyz-CQ\code\Utopia`, and
 deliberately reuses its contract rather than inventing a parallel one — same
@@ -586,16 +593,25 @@ rather than leaving it orphaned at the org level. The OSS coordinates travel as
 `com.everxyz.occt.oss.*` labels and as a `/catalog.json` inside the image, so a
 consumer can resolve the blob from either.
 
-**The image is a pointer, not a copy.** It holds only `catalog.json`, a few KB, so
-`docker pull` gives you the OSS coordinates and you fetch the bytes from there. This
-is the default because GitHub is not meant to host the binaries — baking the archive
-in would put them back on GitHub's storage by another route, and it consumes the
-account's Packages quota, which nothing expires on its own (a Debug pair runs ~199 MB
-Windows + ~265 MB Linux per tag).
+**The image carries the archive.** `docker pull` yields the binaries, because GHCR is
+currently the only retrieval path that works — an index-only image would point at an
+OSS blob that has not been published. Extract them with:
 
-Set repository variable `OCCT_GHCR_INDEX_ONLY` to `false` for the opposite tradeoff:
-a self-contained image whose `docker pull` really does yield the binaries. Old
-versions can be deleted from the Packages UI, or:
+```bash
+docker create --name occt-fetch ghcr.io/everxyz/occt:<tag> /x
+docker cp occt-fetch:/<archive>.tar.gz .
+docker rm occt-fetch
+```
+
+The image is `FROM scratch`, so it has no entrypoint and `docker create` insists on a
+command argument. `/x` is never executed — the container only ever serves as a
+filesystem to copy out of.
+
+The cost is the account's Packages quota, which nothing expires on its own (a Debug
+pair runs ~199 MB Windows + ~265 MB Linux per tag). Once OSS publication works, set
+repository variable `OCCT_GHCR_INDEX_ONLY` to `true` to go back to a pointer-only
+image holding just `catalog.json`. Old versions can be deleted from the Packages UI,
+or:
 
 ```bash
 gh api --method DELETE /orgs/everxyz/packages/container/occt/versions/<version-id>

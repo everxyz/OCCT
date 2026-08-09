@@ -112,13 +112,21 @@ if (-not $tag) { $tag = 'latest' }
 if ($tag.Length -gt 128) { $tag = $tag.Substring(0, 128) }
 $reference = "${image}:${tag}"
 
-# Index-only by default: GitHub does not host the binaries, so the carrier image is a
-# pointer at the OSS blob rather than a copy of it. Baking the archive in would put
-# the bytes back on GitHub's storage by another route, which is what the release notes
-# deliberately stopped doing. Set OCCT_GHCR_INDEX_ONLY=false to make the package
-# self-contained, i.e. 'docker pull' yields the binaries -- at the cost of the
-# account's Packages quota (a Debug pair is ~199 MB Windows + ~265 MB Linux).
-$indexOnly = $true
+# Self-contained by default: 'docker pull' yields the binaries. GHCR is currently
+# the only retrieval path that works -- the OSS bucket and its RAM role are not
+# provisioned yet, so publish-oss.ps1 skips and there is nothing to point at. An
+# index-only image would then reference a blob that does not exist.
+#
+# This does mean GitHub stores the bytes, which is the thing the release notes
+# deliberately stopped doing by attaching release assets. The distinction that
+# makes it acceptable: a GHCR package is authenticated by the same GitHub identity
+# that grants access to this private repository, so the audience is unchanged, and
+# it can be deleted without rewriting release history. Cost is the account's
+# Packages quota (a Debug pair is ~199 MB Windows + ~265 MB Linux).
+#
+# Set OCCT_GHCR_INDEX_ONLY=true once OSS publication works, to go back to a
+# pointer-only carrier image.
+$indexOnly = $false
 if ($env:OCCT_GHCR_INDEX_ONLY) {
     $indexOnly = $env:OCCT_GHCR_INDEX_ONLY -notin @('false', '0', 'no')
 }
@@ -127,7 +135,7 @@ Write-Host ''
 Write-Host "package    $image"
 Write-Host "tag        $tag"
 Write-Host "artifact   $($archiveItem.Name) ($([math]::Round($archiveItem.Length / 1MB, 1)) MB)"
-Write-Host "contents   $(if ($indexOnly) { 'catalog only (pointer at the OSS blob)' } else { 'catalog + archive (OCCT_GHCR_INDEX_ONLY=false)' })"
+Write-Host "contents   $(if ($indexOnly) { 'catalog only, a pointer at the OSS blob (OCCT_GHCR_INDEX_ONLY=true)' } else { 'catalog + archive' })"
 Write-Host ''
 
 # ---------------------------------------------------------------- staging ----
