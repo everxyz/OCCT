@@ -281,18 +281,57 @@ try {
         $env:DOCKER_CONFIG = $dockerConfigDir
     }
 
+    # --provenance is a BuildKit flag, and BuildKit may not be reachable here. buildx
+    # lives at 'C:\Program Files\Docker\cli-plugins\docker-buildx.exe', which on this
+    # host has the same stripped ACL as docker.exe itself: no 'BUILTIN\Users' entry,
+    # so the runner account gets "Access is denied" trying to exec it. The CLI then
+    # falls back to the legacy builder, which rejects '--provenance' as an unknown
+    # flag and fails the build.
+    #
+    # The flag is only needed when BuildKit is in use, because only BuildKit adds the
+    # provenance attestation it suppresses. The legacy builder never does, so
+    # omitting it there changes nothing about the resulting manifest.
+    #
+    # Ask 'docker build' what IT accepts, not whether the buildx plugin exists. Those
+    # differ: with DOCKER_BUILDKIT=0 the plugin is installed and 'buildx version'
+    # succeeds, yet 'build' still routes to the legacy builder and rejects the flag.
+    # --help lists '--provenance' exactly when the flag is accepted.
+    #
+    # Deliberately not vendoring buildx next to docker.exe the way DOCKER_CLI does:
+    # it is a 67 MB binary and this carrier image needs nothing BuildKit offers.
+    # Not '2>&1 | Out-String': the legacy builder prints a deprecation notice to
+    # stderr, and merging a native program's stderr into the pipeline under
+    # $ErrorActionPreference = 'Stop' raises a terminating NativeCommandError. So the
+    # probe for the legacy builder would itself fail on the legacy builder. Capturing
+    # stderr separately keeps it out of the pipeline.
+    $helpOut = [System.IO.Path]::GetTempFileName()
+    $helpErr = [System.IO.Path]::GetTempFileName()
+    try {
+        Start-Process -FilePath $docker -ArgumentList @('build', '--help') `
+            -NoNewWindow -Wait -RedirectStandardOutput $helpOut -RedirectStandardError $helpErr
+        $buildHelp = (Get-Content -LiteralPath $helpOut -Raw -ErrorAction SilentlyContinue)
+    } finally {
+        Remove-Item -LiteralPath $helpOut, $helpErr -Force -ErrorAction SilentlyContinue
+    }
+    $haveProvenance = ($buildHelp -match '--provenance')
+    Write-Host "builder    $(if ($haveProvenance) { 'BuildKit' } else { 'legacy' })"
+
     try {
         # --platform linux/amd64 is not a claim about the artifact: this is a
         # carrier image, and a Linux daemon cannot build a windows/amd64 scratch
         # image. The artifact's real platform is in the tag and in the
         # com.everxyz.occt.platform label.
-        # --provenance=false because Docker Desktop's buildx default would add a
-        # provenance attestation, turning a single manifest into a manifest list
-        # with an extra attestation manifest. Harmless but noise for a carrier
-        # image, and it makes the Packages entry show a phantom second platform.
+        $buildArgs = @('build', '--platform', 'linux/amd64')
+        if ($haveProvenance) {
+            # Without this, buildx turns a single manifest into a manifest list with
+            # an extra attestation manifest. Harmless, but it makes the Packages
+            # entry show a phantom second platform.
+            $buildArgs += '--provenance=false'
+        }
+        $buildArgs += @('-t', $reference, $staging)
+
         Write-Host "building $reference"
-        & $docker @('build', '--platform', 'linux/amd64', '--provenance=false',
-                    '-t', $reference, $staging)
+        & $docker @buildArgs
         if ($LASTEXITCODE -ne 0) { throw "docker build failed ($LASTEXITCODE)" }
 
         if ($DryRun) {
@@ -338,7 +377,14 @@ try {
     } finally {
         # Drop the local tag so the non-ephemeral runner does not accumulate a
         # 265 MB image per build. The registry copy is what matters.
-        & $docker @('image', 'rm', '-f', $reference) 2>&1 | Out-Null
+        #
+        # '2>&1 | Out-Null' is not enough on its own: when the build itself failed
+        # there is no image to remove, and docker's stderr becomes a PowerShell
+        # NativeCommandError whose noise buries the actual build error above it.
+        # Suppressing it here keeps the real failure legible.
+        try {
+            & $docker @('image', 'rm', '-f', $reference) 2>&1 | Out-Null
+        } catch { }
     }
 } finally {
     Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
