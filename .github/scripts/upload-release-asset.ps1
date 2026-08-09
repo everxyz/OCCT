@@ -149,11 +149,11 @@ $preamble = ($preambleLines -join "`n")
 
 if (-not (Get-ReleaseByTag)) {
     Write-Host "Creating release $tag"
-    # everxyz-dev-* tags are pre-releases; everxyz-release-* are full releases.
+    # everxyz-debug-* tags are pre-releases; everxyz-release-* are full releases.
     $body = @{
         tag_name               = $tag
         name                   = $tag
-        prerelease             = $tag.StartsWith('everxyz-dev-')
+        prerelease             = $tag.StartsWith('everxyz-debug-')
         body                   = $preamble
         generate_release_notes = $false
     } | ConvertTo-Json -Compress

@@ -1,7 +1,8 @@
-# Builds everxyz OCCT binaries when an everxyz-release-* or everxyz-dev-* tag is pushed.
+# Builds everxyz OCCT binaries when an everxyz-release-* or everxyz-debug-* tag is
+# pushed.
 #
 #   everxyz-release-*  ->  Release build (optimized)
-#   everxyz-dev-*      ->  Debug build (assertions, debug symbols)
+#   everxyz-debug-*    ->  Debug build (assertions, debug symbols)
 #
 # Targets are Windows x64 (native MSVC) and Linux amd64 (x86_64 in a container).
 # Both are native builds on the self-hosted runner labelled 'everxyz-win'.
@@ -25,7 +26,7 @@ on:
   push:
     tags:
       - 'everxyz-release-*'
-      - 'everxyz-dev-*'
+      - 'everxyz-debug-*'
   workflow_dispatch:
     inputs:
       build_mode:
@@ -92,8 +93,8 @@ jobs:
 
           if ($ref -like 'everxyz-release-*') {
             $mode = 'Release'; $version = $ref.Substring('everxyz-release-'.Length)
-          } elseif ($ref -like 'everxyz-dev-*') {
-            $mode = 'Debug';   $version = $ref.Substring('everxyz-dev-'.Length)
+          } elseif ($ref -like 'everxyz-debug-*') {
+            $mode = 'Debug';   $version = $ref.Substring('everxyz-debug-'.Length)
           } else {
             # workflow_dispatch on a branch: fall back to the chosen input.
             $mode = if ($env:INPUT_MODE) { $env:INPUT_MODE } else { 'Release' }

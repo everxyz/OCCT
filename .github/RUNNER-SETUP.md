@@ -288,10 +288,10 @@ Then a real tag:
 git tag everxyz-release-1.0.0 && git push origin everxyz-release-1.0.0
 ```
 
-Debug builds use the `everxyz-dev-` prefix and are published as pre-releases:
+Debug builds use the `everxyz-debug-` prefix and are published as pre-releases:
 
 ```bash
-git tag everxyz-dev-1.0.0 && git push origin everxyz-dev-1.0.0
+git tag everxyz-debug-1.0.0 && git push origin everxyz-debug-1.0.0
 ```
 
 ## Build performance
@@ -331,7 +331,7 @@ F:\actions-runner\tools\docker.exe run --rm --platform linux/amd64 ubuntu:22.04 
 ```
 
 The two jobs are independent, but a single runner takes one job at a time, so they
-queue rather than overlap. Measured on a `everxyz-dev-*` (Debug) tag, back when the
+queue rather than overlap. Measured on a Debug tag, back when the
 Linux side still had 8 threads: Windows 11 min, Linux 23 min, about 34 min wall clock
 for the pair. Release builds are quicker. Registering a second runner on this machine
 would let them overlap, but both would then compete for the same cores.
