@@ -130,6 +130,11 @@ Write-Host ''
 $staging = Join-Path (Get-Location).Path "ghcr-staging-$([guid]::NewGuid().ToString('n').Substring(0, 8))"
 New-Item -ItemType Directory -Path $staging | Out-Null
 
+# Declared before the try so the matching finally can always read it. Under
+# Set-StrictMode -Version Latest, referencing an unassigned variable throws, which
+# would mask the real error if the script failed before the login block.
+$dockerConfigDir = $null
+
 try {
     # The catalog is the machine-readable OSS pointer. It ships inside the image
     # as well as in the labels, so a consumer that has pulled the image can
@@ -212,46 +217,68 @@ try {
 
     # ------------------------------------------------------------- login ----
 
-    # --password-stdin so the token never reaches argv, where it would be visible
-    # to any process list on this shared, non-ephemeral runner.
+    # No 'docker login' at all. The auth entry is written straight into a private
+    # DOCKER_CONFIG, which is the only thing a successful login would have done.
+    #
+    # Two failed approaches are worth recording, because both look correct:
+    #
+    #   1. '$env:GITHUB_TOKEN | & $docker login --password-stdin'. Piping a string
+    #      to a native executable in Windows PowerShell 5.1 encodes it with
+    #      $OutputEncoding, prepending a UTF-8 BOM and appending CRLF. docker reads
+    #      "\xef\xbb\xbf<token>\r\n" as the password and ghcr.io answers
+    #      'denied: denied'.
+    #
+    #   2. ProcessStartInfo with RedirectStandardInput, writing the exact token
+    #      bytes to BaseStream. This fixes the encoding -- a byte-dumping child
+    #      confirms it receives the 40 token bytes and nothing else -- and ghcr.io
+    #      STILL answers 'denied: denied'. The same token through a real shell pipe
+    #      succeeds on the same daemon in the same second, so it is not the token,
+    #      not the scopes and not the registry. docker's --password-stdin does not
+    #      accept a .NET redirected pipe as its password source and falls back to an
+    #      empty password.
+    #
+    # Routing it through 'cmd /c type <file> | docker login' does work, but that
+    # means a plaintext token in a file under %TEMP%, whose inherited ACLs on this
+    # host grant several non-owner SIDs Modify. Writing the config directly avoids
+    # the token touching argv, a shared-ACL file, or the interactive user's
+    # ~/.docker/config.json -- which matters because that config has
+    # 'credsStore: desktop', a helper bound to the interactive session that a
+    # service account cannot reach.
+    #
+    # Verified against the live registry: 'docker manifest inspect' on an absent tag
+    # returns 'manifest unknown' rather than 'denied', i.e. authentication passed.
     if (-not $DryRun) {
-        Write-Host "logging in to ghcr.io as $($env:GITHUB_ACTOR)"
+        Write-Host "authenticating to ghcr.io as $($env:GITHUB_ACTOR)"
 
-        # NOT '$env:GITHUB_TOKEN | & $docker login --password-stdin'. Piping a
-        # string to a native executable in Windows PowerShell 5.1 encodes it with
-        # $OutputEncoding, which prepends a UTF-8 BOM and appends CRLF: docker
-        # then reads "\xef\xbb\xbf<token>\r\n" as the password and ghcr.io answers
-        # 'denied: denied'. Verified by piping to a byte-dumping process.
-        #
-        # So the token is written to the child's stdin as exact bytes. Still not
-        # argv: this runner is shared and non-ephemeral, and a token there would
-        # be readable from any local process list.
-        $startInfo = New-Object System.Diagnostics.ProcessStartInfo
-        $startInfo.FileName = $docker
-        # A single Arguments string, not ArgumentList: the latter only exists on
-        # .NET Core, and this is Windows PowerShell 5.1 on .NET Framework 4.x.
-        # GITHUB_ACTOR is a GitHub login (no spaces or quotes), but it is the one
-        # interpolated value here, so it is quoted rather than trusted.
-        $actor = ($env:GITHUB_ACTOR -replace '"', '')
-        $startInfo.Arguments = "login ghcr.io --username `"$actor`" --password-stdin"
-        $startInfo.RedirectStandardInput = $true
-        $startInfo.UseShellExecute = $false
+        # In the workspace, not %TEMP%: same volume as the build context, and the
+        # ACL below is set explicitly rather than inherited either way.
+        $dockerConfigDir = Join-Path (Get-Location).Path `
+            ("docker-cfg-" + [guid]::NewGuid().ToString('n').Substring(0, 8))
+        New-Item -ItemType Directory -Path $dockerConfigDir | Out-Null
 
-        $loginProcess = [System.Diagnostics.Process]::Start($startInfo)
-        try {
-            $stdin = $loginProcess.StandardInput
-            # No BOM, no trailing newline: docker trims, but the BOM is the bug.
-            $bytes = [System.Text.Encoding]::ASCII.GetBytes($env:GITHUB_TOKEN)
-            $stdin.BaseStream.Write($bytes, 0, $bytes.Length)
-            $stdin.BaseStream.Flush()
-            $stdin.Close()
-            $loginProcess.WaitForExit()
-            if ($loginProcess.ExitCode -ne 0) {
-                throw "docker login ghcr.io failed ($($loginProcess.ExitCode))"
-            }
-        } finally {
-            $loginProcess.Dispose()
-        }
+        # Owner-only, inheritance disabled and NOT copied, so the parent's ACEs do
+        # not carry over. The file holds a bearer credential for the whole job.
+        $acl = New-Object System.Security.AccessControl.DirectorySecurity
+        $acl.SetAccessRuleProtection($true, $false)
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+            [System.Security.Principal.WindowsIdentity]::GetCurrent().User,
+            'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+        (Get-Item -LiteralPath $dockerConfigDir).SetAccessControl($acl)
+
+        # Registry basic auth: base64("<user>:<token>"). GITHUB_ACTOR is a GitHub
+        # login so it cannot contain a colon, but ghcr.io ignores the username for
+        # token auth regardless.
+        $actor = ($env:GITHUB_ACTOR -replace ':', '')
+        $basic = [System.Convert]::ToBase64String(
+            [System.Text.Encoding]::ASCII.GetBytes("${actor}:$($env:GITHUB_TOKEN)"))
+        $dockerConfig = @{ auths = @{ 'ghcr.io' = @{ auth = $basic } } } |
+            ConvertTo-Json -Depth 5
+        [System.IO.File]::WriteAllText(
+            (Join-Path $dockerConfigDir 'config.json'), $dockerConfig,
+            (New-Object System.Text.UTF8Encoding($false)))
+
+        # Scoped to the child docker processes below; cleared in the finally.
+        $env:DOCKER_CONFIG = $dockerConfigDir
     }
 
     try {
@@ -312,10 +339,15 @@ try {
         # Drop the local tag so the non-ephemeral runner does not accumulate a
         # 265 MB image per build. The registry copy is what matters.
         & $docker @('image', 'rm', '-f', $reference) 2>&1 | Out-Null
-        # And drop the stored credential, which docker login writes to the
-        # runner account's config.json.
-        & $docker @('logout', 'ghcr.io') 2>&1 | Out-Null
     }
 } finally {
     Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
+    # No 'docker logout': the credential never entered the runner account's
+    # ~/.docker/config.json, only the private directory below. Deleting it is the
+    # logout, and it must happen even if the build threw -- this runner is not
+    # ephemeral, so a leftover config.json would outlive the job.
+    if ($dockerConfigDir) {
+        $env:DOCKER_CONFIG = $null
+        Remove-Item -LiteralPath $dockerConfigDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
