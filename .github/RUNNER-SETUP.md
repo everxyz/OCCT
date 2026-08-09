@@ -157,6 +157,39 @@ environment:
 Restart-Service actions.runner.everxyz-OCCT.everxyz-win-01
 ```
 
+### What the build actually contains
+
+The artifact is a **headless CAD kernel**, not a full OCCT install: STEP/IGES
+import, BRep construction and mesh generation, with no visualization. 27 toolkits
+instead of the ~150 a default build produces.
+
+Rather than switch modules on and let each drag in everything beside it, every
+`BUILD_MODULE_*` is off and the capability toolkits are named explicitly:
+
+```
+-D BUILD_ADDITIONAL_TOOLKITS="TKDESTEP;TKDEIGES;TKXCAF;TKMesh;TKFillet;TKOffset"
+```
+
+CMake then resolves the dependency closure, and the closure decides the rest. The
+first four match the set Utopia locks for its own OCCT build
+(`third_party/sdk-supply/occt-source-lock.json`). `TKFillet` and `TKOffset` are
+added because `BRepFilletAPI` and `BRepOffsetAPI` — fillet, chamfer, sweep, loft,
+thick solid — are part of BRep construction and are not reachable from the
+reader/mesh set alone.
+
+`TKOpenGl` is not in the closure, so `CAN_USE_OPENGL` goes false and the GL and
+GLES backends drop out on their own. `USE_OPENGL=OFF` is still passed to state the
+intent rather than rely on that inference. On Linux `USE_XLIB=OFF` is also needed:
+unlike Windows it defaults to ON.
+
+Two toolkits look out of place and belong there. `TKV3d` and `TKService` are
+link-level dependencies of `TKXCAF`, which carries STEP assembly structure, colours
+and names. Neither contains GL code and neither needs a display.
+
+One consequence for the Linux container: it installs only `build-essential` and
+`cmake`. No `libx11-dev`, `libgl1-mesa-dev`, `tcl-dev` or `tk-dev` — nothing in the
+closure links against them, which also cuts container setup time.
+
 ## 5. Docker for the Linux amd64 job
 
 The Linux build runs in an `ubuntu:22.04` container. The host is x86_64 and the
@@ -377,10 +410,28 @@ deliberately reuses its contract rather than inventing a parallel one — same
 layout, same gzip transport encoding, same immutability rules. A consumer that can
 restore a Utopia engineering asset can restore an OCCT artifact with the same code.
 
-The contract lives in [`oss-artifacts.json`](oss-artifacts.json). The bucket and the
-RAM roles are **not** shared with Utopia: OCCT binaries are a different asset class,
-and reusing `everxyz-utopia-fixtures-cn-shenzhen` would let a build job write into
-Utopia's fixture trust domain.
+The contract lives in [`oss-artifacts.json`](oss-artifacts.json).
+
+**The bucket is shared with Utopia; the RAM role is not.** Artifacts land in
+`everxyz-utopia-sdk-supply-cn-shenzhen`, the bucket Utopia already tracks as
+`buckets.sdk`. That is not a convenience — Utopia's `maintain-engineering-assets`
+contract requires reusing the tracked provider, bucket and rights context rather
+than proposing new ones. Sharing it is safe because keys are content-addressed: an
+object key is a pure function of the bytes, so an OCCT artifact cannot collide with
+another asset's key, and `--forbid-overwrite` turns a digest collision into a loud
+failure instead of a silent clobber.
+
+The RAM role is deliberately separate. Handing an OCCT build job Utopia's
+`UtopiaSdkSupplyPublish` identity would widen its blast radius well past this
+repository, and Utopia's own contract requires read, publish and cleanup roles stay
+separate. OCCT gets its own role with the same narrow policy shape.
+
+One consequence to be aware of: because both repositories publish under the same
+`blobs/gzip/sha256/` prefix, this role can *read* any blob there. It cannot delete
+or overwrite anything, cannot reach outside the prefix, and cannot be assumed by
+anything but this repository's tagged builds. Read-across is inherent to sharing a
+content-addressed prefix; narrowing it would need a per-repository prefix, which the
+tracked contract does not provide.
 
 ### Why the object key is a digest, not a filename
 
@@ -413,13 +464,28 @@ job, and one passed as an argument would be visible to any local process list. O
 three are required — an AK/SK pair alone gets a `403 InvalidAccessKeyId` from STS
 credentials.
 
-### Aliyun setup (one-off, by hand)
+### Aliyun setup (one-off)
 
-Nothing below is automated: it touches your Aliyun account, not this machine.
+[`scripts/setup-aliyun-oss.ps1`](scripts/setup-aliyun-oss.ps1) does all of this and
+is idempotent. Authenticate first — no static AccessKey is created or stored:
 
-1. **Create the bucket** `everxyz-occt-artifacts-cn-shenzhen` in `cn-shenzhen`,
-   ACL private, block public access on, versioning disabled. Match
-   `bucket_contract` in `oss-artifacts.json`.
+```bash
+aliyun configure --mode OAuth
+```
+
+Then preview, and apply:
+
+```bash
+powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/setup-aliyun-oss.ps1 -WhatIf
+```
+
+The steps it performs, if you would rather do them by hand in the console. It
+touches your Aliyun account, not this machine.
+
+1. **Nothing to create for the bucket.** `everxyz-utopia-sdk-supply-cn-shenzhen`
+   already exists and belongs to Utopia. The script verifies it and reports any
+   divergence from `bucket_contract`, but applies nothing: reconfiguring a bucket
+   this repository does not own is outside its remit.
 
 2. **Create an OIDC provider** in RAM pointing at GitHub:
 
@@ -451,7 +517,8 @@ Nothing below is automated: it touches your Aliyun account, not this machine.
    ```
 
    Attach a policy carrying exactly `oss:GetObject` and `oss:PutObject` on
-   `acs:oss:*:*:everxyz-occt-artifacts-cn-shenzhen/blobs/gzip/sha256/*`.
+   `acs:oss:*:*:everxyz-utopia-sdk-supply-cn-shenzhen/blobs/gzip/sha256/*`.
+   No delete action, and nothing outside that prefix.
 
    The `oidc:sub` pattern above only matches tag pushes. Manual runs with
    **publish** ticked come from a branch and will be refused; add

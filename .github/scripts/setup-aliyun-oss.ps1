@@ -13,11 +13,20 @@
 
     What it creates:
 
-      1. OSS bucket, private ACL, ZRS redundancy      (bucket_contract)
-      2. RAM OIDC provider trusting GitHub's issuer   (fingerprint-pinned)
-      3. RAM policy: oss:GetObject + oss:PutObject on blobs/gzip/sha256/* only
-      4. RAM role with a trust policy scoped to THIS repository
-      5. Repository variables OCCT_OSS_ROLE_ARN / OCCT_OSS_OIDC_PROVIDER_ARN
+      1. RAM OIDC provider trusting GitHub's issuer   (fingerprint-pinned)
+      2. RAM policy: oss:GetObject + oss:PutObject on blobs/gzip/sha256/* only
+      3. RAM role with a trust policy scoped to THIS repository
+      4. Repository variables OCCT_OSS_ROLE_ARN / OCCT_OSS_OIDC_PROVIDER_ARN
+
+    What it does NOT create: the bucket. Artifacts land in Utopia's tracked SDK
+    supply bucket, which already exists and holds Utopia's production assets.
+    This script verifies it and reports any divergence from the tracked
+    bucket_contract, but applies nothing -- reconfiguring a bucket this
+    repository does not own would be a cloud mutation outside its remit.
+
+    Because the bucket is shared, the RAM role is deliberately NOT shared: this
+    repository gets its own, never Utopia's UtopiaSdkSupplyPublish. See
+    .github/oss-artifacts.json for the full reasoning.
 
     Authentication: 'aliyun configure --mode OAuth' (browser login), the same
     human path Utopia uses. No static AccessKey is created or stored.
@@ -303,31 +312,39 @@ if ($WhatIfPreference) {
 
 Write-Step "OSS bucket $Bucket"
 
-$ossutil = & (Join-Path (Split-Path -Parent $PSCommandPath) 'install-ossutil.ps1') |
-           Select-Object -Last 1
-if (-not ($ossutil -and (Test-Path -LiteralPath $ossutil))) {
-    throw "could not vendor ossutil (got: $ossutil)"
-}
-
-# ossutil reads the aliyun-cli OAuth profile only via an explicit credential
-# bridge, so the bucket is created through the aliyun CLI's own oss command.
-$bucketProbe = Invoke-Aliyun @('oss', 'stat', "oss://$Bucket", '--region', $Region)
+# Verified, never created. This bucket is Utopia's tracked SDK supply bucket and
+# holds its production assets; creating or reconfiguring a bucket this repository
+# does not own would be a cloud mutation outside its remit. If it is missing,
+# that is a question for the Utopia side, not something to paper over here.
+$bucketProbe = Invoke-Aliyun @('oss', 'stat', "oss://$Bucket")
 if ($bucketProbe.ExitCode -eq 0) {
-    Write-Skip "$Bucket"
-} else {
-    if ($PSCmdlet.ShouldProcess($Bucket, 'create OSS bucket')) {
-        $mb = Invoke-Aliyun @(
-            'oss', 'mb', "oss://$Bucket",
-            '--region', $Region,
-            '--acl', 'private',
-            '--storage-class', $storage,
-            '--redundancy-type', $redundancy)
-        if ($mb.ExitCode -ne 0) {
-            Write-Host $mb.Raw
-            throw "failed to create bucket $Bucket"
+    Write-Ok "$Bucket exists"
+
+    # Report the live properties against the tracked contract. Divergence is
+    # surfaced, not corrected.
+    foreach ($check in @(
+        @{ Label = 'ACL';         Pattern = 'ACL\s*:\s*(\S+)';                     Expected = $contract.bucket_contract.acl },
+        @{ Label = 'StorageClass'; Pattern = 'StorageClass\s*:\s*(\S+)';           Expected = $storage },
+        @{ Label = 'Redundancy';  Pattern = 'RedundancyType\s*:\s*(\S+)';          Expected = $redundancy })) {
+        if ($bucketProbe.Raw -match $check.Pattern) {
+            $actual = $Matches[1]
+            if ($actual -eq $check.Expected) {
+                Write-Host "        $($check.Label) = $actual" -ForegroundColor DarkGray
+            } else {
+                Write-Warn "$($check.Label) is '$actual', contract expects '$($check.Expected)'"
+            }
         }
-        Write-Ok "created $Bucket"
     }
+} else {
+    Write-Host $bucketProbe.Raw
+    throw @"
+Bucket $Bucket does not exist or is not readable by this identity.
+
+It is declared and owned by the Utopia repository
+(third_party/engineering-assets.json, buckets.sdk), so this script does not
+create it. Either the identity you logged in as cannot see it, or it has not been
+provisioned on the Utopia side.
+"@
 }
 
 # --------------------------------------------------------- OIDC provider -----
@@ -362,6 +379,20 @@ Write-Step "RAM policy $PolicyName"
 # Exactly Utopia's fixtures_publish shape: read + write on the content-addressed
 # prefix, nothing else. No delete action anywhere, so a compromised CI job cannot
 # destroy published artifacts -- only add new immutable ones.
+#
+# Worth being precise about the residual access, since this bucket is Utopia's and
+# holds its production assets. The Resource line is scoped to the bucket and the
+# blobs/gzip/sha256/* prefix, but Utopia publishes its own blobs under that same
+# content-addressed prefix. So this role can read any object there, and can create
+# new ones. What it cannot do:
+#   - delete or overwrite anything: no oss:DeleteObject, and the publish path
+#     passes --forbid-overwrite, so a PutObject onto an occupied key fails
+#   - touch anything outside the prefix (bucket config, other prefixes, the
+#     fixtures bucket, any other Aliyun service)
+#   - be assumed by anything but this repository's tagged builds (trust policy)
+# Read-across is inherent to sharing a content-addressed prefix and is the price
+# of the tracked contract's "reuse the tracked bucket" rule. Narrowing it further
+# would need a per-repository prefix, which that contract does not provide.
 $policyDocument = [ordered]@{
     Version   = '1'
     Statement = @(

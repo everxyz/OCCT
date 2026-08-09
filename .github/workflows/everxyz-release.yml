@@ -152,15 +152,38 @@ jobs:
       - name: Configure
         run: |
           $ErrorActionPreference = 'Stop'
+          # Headless CAD kernel: STEP/IGES import, BRep modelling, mesh generation.
+          # No visualization.
+          #
+          # Every module is switched off and the capability toolkits are named
+          # explicitly instead, so the dependency closure decides what gets built
+          # rather than a module list dragging in everything beside it. TKOpenGl is
+          # not reachable from this closure, so CAN_USE_OPENGL goes false and the
+          # GL/GLES backends drop out on their own (CMakeLists.txt:531,663-672).
+          #
+          # TKFillet and TKOffset are not reachable from the reader/mesh set, so
+          # they are named too: BRepFilletAPI and BRepOffsetAPI (fillet, chamfer,
+          # sweep, loft, thick solid) are part of BRep construction.
+          #
+          # TKV3d and TKService still appear in the closure. They are link-level
+          # dependencies of TKXCAF, which carries STEP assembly structure, colours
+          # and names. They contain no GL code and need no display.
           cmake -S src-win -B build-win -G "Visual Studio 17 2022" -A x64 `
             -D CMAKE_BUILD_TYPE=$env:MODE `
             -D BUILD_LIBRARY_TYPE=Shared `
             -D BUILD_CPP_STANDARD=C++17 `
+            -D BUILD_MODULE_FoundationClasses=OFF `
+            -D BUILD_MODULE_ModelingData=OFF `
+            -D BUILD_MODULE_ModelingAlgorithms=OFF `
+            -D BUILD_MODULE_Visualization=OFF `
+            -D BUILD_MODULE_ApplicationFramework=OFF `
+            -D BUILD_MODULE_DataExchange=OFF `
             -D BUILD_MODULE_Draw=OFF `
+            -D BUILD_ADDITIONAL_TOOLKITS="TKDESTEP;TKDEIGES;TKXCAF;TKMesh;TKFillet;TKOffset" `
             -D BUILD_DOC_Overview=OFF `
+            -D USE_OPENGL=OFF `
             -D USE_FREETYPE=OFF `
             -D USE_TK=OFF `
-            -D USE_OPENGL=ON `
             -D INSTALL_DIR="$PWD/install-win"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -293,18 +316,31 @@ jobs:
             'set -eo pipefail'
             'export DEBIAN_FRONTEND=noninteractive'
             'apt-get update -qq'
-            'apt-get install -y -qq --no-install-recommends \'
-            '  build-essential cmake libx11-dev libxext-dev libxmu-dev libxi-dev \'
-            '  libgl1-mesa-dev libglu1-mesa-dev tcl-dev tk-dev'
+            # No X11, GL or Tcl/Tk headers: this is a headless kernel build and
+            # nothing in the toolkit closure links against them.
+            'apt-get install -y -qq --no-install-recommends build-essential cmake'
+            # Headless CAD kernel: STEP/IGES import, BRep modelling, mesh
+            # generation. No visualization. See the Windows job for why the
+            # toolkits are named individually and why TKV3d/TKService remain.
+            # USE_XLIB is additionally forced off here because it defaults to ON
+            # on Linux (CMakeLists.txt:392-394), unlike on Windows.
             'cmake -S /src -B /tmp/build -G "Unix Makefiles" \'
             '  -D CMAKE_BUILD_TYPE="$MODE" \'
             '  -D BUILD_LIBRARY_TYPE=Shared \'
             '  -D BUILD_CPP_STANDARD=C++17 \'
+            '  -D BUILD_MODULE_FoundationClasses=OFF \'
+            '  -D BUILD_MODULE_ModelingData=OFF \'
+            '  -D BUILD_MODULE_ModelingAlgorithms=OFF \'
+            '  -D BUILD_MODULE_Visualization=OFF \'
+            '  -D BUILD_MODULE_ApplicationFramework=OFF \'
+            '  -D BUILD_MODULE_DataExchange=OFF \'
             '  -D BUILD_MODULE_Draw=OFF \'
+            '  -D BUILD_ADDITIONAL_TOOLKITS="TKDESTEP;TKDEIGES;TKXCAF;TKMesh;TKFillet;TKOffset" \'
             '  -D BUILD_DOC_Overview=OFF \'
+            '  -D USE_OPENGL=OFF \'
+            '  -D USE_XLIB=OFF \'
             '  -D USE_FREETYPE=OFF \'
             '  -D USE_TK=OFF \'
-            '  -D USE_OPENGL=ON \'
             '  -D INSTALL_DIR=/tmp/install'
             'cmake --build /tmp/build --target install -- -j"$(nproc)"'
             'cp -a /tmp/install /out/install-linux'

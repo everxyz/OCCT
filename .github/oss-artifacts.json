@@ -1,21 +1,33 @@
 {
   "_comment": [
-    "Publication contract for everxyz OCCT build artifacts, modelled on Utopia's",
-    "third_party/engineering-assets.json (schema utopia-engineering-assets.v1).",
+    "Publication contract for everxyz OCCT build artifacts.",
     "",
-    "Kept identical to Utopia where the property is part of the shared contract:",
-    "region, endpoints, object_key_prefix, transport_encoding and bucket_contract.",
-    "A consumer that can restore a Utopia engineering asset can restore an OCCT",
-    "artifact with the same code path.",
+    "The bucket, region, endpoints, object key layout and transport encoding are",
+    "NOT ours to choose: they are the tracked Engineering Asset Supply contract",
+    "declared in the Utopia repository (third_party/engineering-assets.json,",
+    "schema utopia-engineering-assets.v1). This file restates the subset an OCCT",
+    "build job needs so the workflow does not have to read another repository.",
     "",
-    "Deliberately NOT shared with Utopia: the bucket and the RAM roles. OCCT",
-    "binaries are a different asset class from Utopia's fixtures and vendor SDKs,",
-    "so they get their own bucket and their own publish/read roles. Reusing",
-    "everxyz-utopia-fixtures-cn-shenzhen would let an OCCT build job write into",
-    "Utopia's fixture trust domain.",
+    "Artifacts land in the already-declared SDK supply bucket. No new bucket is",
+    "created -- reusing the tracked one is required by Utopia's",
+    "maintain-engineering-assets contract, which says to reuse the tracked",
+    "provider, bucket and rights context rather than propose new ones.",
     "",
-    "Every value here is overridable at runtime by the matching OCCT_OSS_*",
-    "repository variable, so the bucket can be renamed without a code change."
+    "Sharing that bucket is safe despite it holding Utopia's production assets,",
+    "because keys are content-addressed: an object key is a pure function of the",
+    "bytes, so an OCCT artifact cannot land on a key another asset would use, and",
+    "--forbid-overwrite makes a digest collision fail loudly instead of",
+    "clobbering. What is NOT shared is the RAM role: Utopia's",
+    "UtopiaSdkSupplyPublish is not reused, because handing an OCCT build job",
+    "Utopia's publish identity would widen its blast radius well past this",
+    "repository. OCCT gets its own role with the same narrow policy shape.",
+    "",
+    "Consuming these artifacts is out of scope here. Utopia currently rebuilds",
+    "OCCT 8.0.0.p1 from the locked upstream source and reads nothing from OSS for",
+    "it; whether that changes is a decision for the Utopia side.",
+    "",
+    "Every value is overridable at runtime by the matching OCCT_OSS_* repository",
+    "variable, so the target can be repointed without a code change."
   ],
   "schema_version": "everxyz-occt-artifacts.v1",
   "provider": "aliyun-oss",
@@ -26,13 +38,21 @@
   "object_key_prefix": "blobs/gzip/sha256",
   "transport_encoding": "gzip",
   "bucket": {
-    "name": "everxyz-occt-artifacts-cn-shenzhen",
-    "profiles": {
-      "read": "occt-artifacts-read",
-      "publish": "occt-artifacts-publish"
-    }
+    "_comment": [
+      "Declared and owned by Utopia as 'buckets.sdk'. Pre-existing: the setup",
+      "script verifies it and refuses to create it."
+    ],
+    "name": "everxyz-utopia-sdk-supply-cn-shenzhen",
+    "public_endpoint": "https://utopia-sdk-supply.everxyz.com",
+    "owned_by": "utopia",
+    "create": false
   },
   "bucket_contract": {
+    "_comment": [
+      "Expected properties of the tracked bucket, for verification only. Nothing",
+      "here is applied: changing settings on a bucket this repository does not own",
+      "would be a cloud mutation outside its remit."
+    ],
     "storage_class": "Standard",
     "redundancy_type": "ZRS",
     "acl": "private",
@@ -55,15 +75,21 @@
       "GitHub OIDC federated into RAM via sts:AssumeRoleWithOIDC. This is the",
       "closest available analogue to Utopia's ACK RRSA path: the workload proves",
       "its identity with a short-lived OIDC token and receives short-lived STS",
-      "credentials. No static AccessKey is stored in this repository.",
+      "credentials. No static AccessKey is stored in this repository, which is",
+      "also Utopia's rule -- never ask for a long-lived AccessKey.",
       "",
       "Utopia's other mechanism, aliyun-cli OAuth, is for humans at a terminal and",
-      "cannot work unattended on a runner."
+      "cannot work unattended on a runner. It is what provisions this, once.",
+      "",
+      "The role is OCCT's own, deliberately NOT Utopia's UtopiaSdkSupplyPublish:",
+      "Utopia's contract requires read, publish and cleanup roles stay separate,",
+      "and the same reasoning keeps this repository's publisher separate again."
     ],
     "mechanism": "sts:AssumeRoleWithOIDC",
     "oidc_issuer": "https://token.actions.githubusercontent.com",
     "audience": "sts.aliyuncs.com",
     "session_duration_seconds": 3600,
-    "static_access_key_retained": false
+    "static_access_key_retained": false,
+    "role_shared_with_utopia": false
   }
 }
