@@ -168,14 +168,30 @@ jobs:
 
       - name: Build in amd64 container
         shell: bash
+        env:
+          # Docker Desktop's named pipe (dockerDesktopLinuxEngine) belongs to the
+          # interactive user's session, so a service account cannot reach it even
+          # when it is in docker-users. The TCP endpoint is session-independent.
+          # Requires "Expose daemon on tcp://localhost:2375" in Docker Desktop.
+          DOCKER_HOST: tcp://localhost:2375
         run: |
           set -euo pipefail
           rm -rf install-linux
 
+          docker version --format 'daemon {{.Server.Version}}' >/dev/null || {
+            echo "::error::Cannot reach the Docker daemon on ${DOCKER_HOST}."
+            echo "Enable 'Expose daemon on tcp://localhost:2375 without TLS' in"
+            echo "Docker Desktop settings, and make sure Docker Desktop is running."
+            exit 1
+          }
+
+          # MSYS_NO_PATHCONV stops Git Bash rewriting the container-side paths in -v.
+          export MSYS_NO_PATHCONV=1
+
           # Native x86_64 build: the runner host is amd64, so no emulation.
           docker run --rm --platform linux/amd64 \
-            -v "$(pwd)/src-linux:/src:ro" \
-            -v "$(pwd):/out" \
+            -v "$(pwd -W 2>/dev/null || pwd)/src-linux:/src:ro" \
+            -v "$(pwd -W 2>/dev/null || pwd):/out" \
             -e MODE="$MODE" \
             ubuntu:22.04 bash -euo pipefail -c '
               export DEBIAN_FRONTEND=noninteractive

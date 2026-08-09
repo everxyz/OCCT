@@ -116,20 +116,45 @@ Restart-Service actions.runner.everxyz-OCCT.everxyz-win-01
 The Linux build runs in an `ubuntu:22.04` container. The host is x86_64 and the
 target is amd64, so this is a native build with no emulation involved.
 
-Docker Desktop must be running when a build starts, and it must be reachable by the
-`ghrunner` account. Docker Desktop runs per-user, which is awkward for a service
-account. Two options:
+### Why the named pipe does not work
 
-- Set Docker Desktop to start on boot and log in once as `ghrunner` so its context
-  exists, or
-- switch the Linux job to WSL instead of Docker (Ubuntu-22.04 is already installed),
-  which avoids the service-account problem entirely.
+Docker Desktop talks over the named pipe `dockerDesktopLinuxEngine`, which is created
+by its GUI process and belongs to **that user's session**. A runner running as
+`ghrunner` is in a different session and cannot open it, even though `ghrunner` is a
+member of `docker-users` — that group only governs the legacy `docker_engine` pipe.
+Signing in as `ghrunner` and starting a second Docker Desktop does not help either,
+since both instances would fight over the same WSL2 backend.
 
-Verify Docker works from the runner account:
+Switching the job to WSL runs into the same wall for a different reason: WSL distros
+are registered per-user under `HKCU`, and `Ubuntu-22.04` belongs to `sxd` with its
+files under `C:\Users\sxd\AppData\Local\...`, which `ghrunner` cannot read.
+
+### What the workflow uses instead
+
+The TCP endpoint, which is not tied to a session. The job sets
+`DOCKER_HOST=tcp://localhost:2375`, so Docker Desktop needs:
+
+**Settings → General → "Expose daemon on tcp://localhost:2375 without TLS"** — enabled.
+
+Be aware of the tradeoff: 2375 is plaintext and unauthenticated. It binds only to
+`127.0.0.1` and `[::1]` (verified, with no inbound firewall rule opening it), so it is
+not reachable from the network — but any local process can use it to control Docker,
+which is equivalent to root on this machine.
+
+Docker Desktop also has to be **running** when a build starts, and `AutoStart` is
+currently `false`, so it does not come back by itself after a reboot. Either enable
+"Start Docker Desktop when you sign in" in its settings, or start it manually before
+tagging a release. The job fails with an explicit message if the daemon is unreachable
+rather than emitting a confusing `docker run` error.
+
+Verify the endpoint:
 
 ```powershell
+$env:DOCKER_HOST = "tcp://localhost:2375"
 docker run --rm --platform linux/amd64 ubuntu:22.04 uname -m
 ```
+
+Expected output: `x86_64`.
 
 That should print `x86_64`.
 
