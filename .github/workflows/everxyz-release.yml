@@ -7,9 +7,9 @@
 # Targets are Windows x64 (native MSVC) and Linux amd64 (x86_64 in a container).
 # Both are native builds on the self-hosted runner labelled 'everxyz-win'.
 #
-# Deliberately uses no external actions: the repository's Actions policy is set to
-# allow only everxyz-owned actions, so actions/checkout and friends are blocked.
-# Checkout, archiving and release upload are done with git, tar and the REST API.
+# Deliberately uses no external actions, so this workflow keeps working regardless
+# of how the organization's Actions allowlist is configured. Checkout, archiving and
+# release upload are done with git, tar and the REST API.
 #
 # Every host-side step runs in Windows PowerShell 5.1 ('shell: powershell'), which
 # is the only shell that actually works on this runner:
