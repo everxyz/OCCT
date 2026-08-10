@@ -225,7 +225,7 @@ runs:
 
     - name: Upload regression test results (Windows)
       if: ${{ inputs.platform == 'windows' && steps.check_failures.outputs.failed_count > 0 }}
-      uses: actions/upload-artifact@v4.4.3
+      uses: actions/upload-artifact@v4.6.2
       with:
         name: ${{ inputs.results-artifact-name }}-retest
         path: install/results/${{ inputs.test-directory-name }}-retest
@@ -234,7 +234,7 @@ runs:
         
     - name: Upload regression test results (macOS/Linux)
       if: ${{ inputs.platform != 'windows' && steps.check_failures.outputs.failed_count > 0 }}
-      uses: actions/upload-artifact@v4.4.3
+      uses: actions/upload-artifact@v4.6.2
       with:
         name: ${{ inputs.results-artifact-name }}-retest
         path: install/bin/results/${{ inputs.test-directory-name }}-retest
@@ -272,7 +272,7 @@ runs:
 
     - name: Upload updated test results (Windows)
       if: ${{ inputs.platform == 'windows' && steps.check_failures.outputs.failed_count > 0 }}
-      uses: actions/upload-artifact@v4.4.3
+      uses: actions/upload-artifact@v4.6.2
       with:
         name: ${{ inputs.results-artifact-name }}
         path: install/results/${{ inputs.test-directory-name }}*
@@ -281,7 +281,7 @@ runs:
 
     - name: Upload updated test results (macOS/Linux)
       if : ${{ inputs.platform != 'windows' && steps.check_failures.outputs.failed_count > 0 }}
-      uses: actions/upload-artifact@v4.4.3
+      uses: actions/upload-artifact@v4.6.2
       with:
         name: ${{ inputs.results-artifact-name }}
         path: install/bin/results/${{ inputs.test-directory-name }}*
