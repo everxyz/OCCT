@@ -1,10 +1,21 @@
-# Keeps this fork (everxyz/OCCT) up to date with Open-Cascade-SAS/OCCT once per day.
+# Keeps this fork (everxyz/OCCT) in step with Open-Cascade-SAS/OCCT once per day.
 #
-# Branch syncing goes through the REST merge-upstream endpoint rather than a push.
-# GITHUB_TOKEN is forbidden from pushing commits that touch .github/workflows, and
-# upstream edits those files regularly, so a plain `git push` sync would start
+# The branch topology this maintains:
+#   master           everxyz's own release line. Never synced -- upstream reaches it
+#                    by a deliberate merge, by hand, not on a schedule.
+#   upstreamSAS      a clean mirror of upstream's default branch, fast-forward only.
+#   everything else  synced against the upstream branch of the same name.
+#
+# Name-matched branches go through the REST merge-upstream endpoint rather than a
+# push. GITHUB_TOKEN is forbidden from pushing commits that touch .github/workflows,
+# and upstream edits those files regularly, so a plain `git push` sync would start
 # failing the first time a workflow file changed upstream. merge-upstream is
 # performed by GitHub server-side and is not subject to that restriction.
+#
+# upstreamSAS cannot use merge-upstream, which only ever merges the upstream branch
+# of the same name and upstream has no 'upstreamSAS'. It is advanced by pointing its
+# ref at upstream's tip through the git refs API instead -- also server-side, and
+# creating no commit.
 #
 # Nothing here force-updates a ref: diverged branches and moved tags are reported
 # in the run summary and left alone rather than overwritten.
@@ -26,6 +37,11 @@ concurrency:
 
 env:
   UPSTREAM: Open-Cascade-SAS/OCCT
+  # Branches this fork owns. Held back from the merge-upstream loop even when
+  # upstream has a branch of the same name. Space-separated.
+  OWN_BRANCHES: master
+  # Mirror of upstream's default branch, maintained by its own step below.
+  MIRROR_BRANCH: upstreamSAS
   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
@@ -43,9 +59,14 @@ jobs:
           gh api "repos/$UPSTREAM/branches" --paginate --jq '.[].name' | sort -u > upstream.txt
           gh api "repos/$GITHUB_REPOSITORY/branches" --paginate --jq '.[].name' | sort -u > fork.txt
 
-          synced=(); current=(); conflict=(); missing=()
+          synced=(); current=(); conflict=(); missing=(); held=()
 
           while read -r branch; do
+            # Branches this fork owns are never merged into from upstream.
+            case " $OWN_BRANCHES " in
+              *" $branch "*) held+=("$branch"); continue ;;
+            esac
+
             if ! grep -qxF "$branch" fork.txt; then
               missing+=("$branch")
               continue
@@ -71,6 +92,7 @@ jobs:
             echo "- already current: ${#current[@]}"
             echo "- failed / diverged: ${#conflict[@]} ${conflict[*]:-}"
             echo "- present upstream but not in this fork: ${#missing[@]} ${missing[*]:-}"
+            echo "- held back as ours: ${#held[@]} ${held[*]:-}"
           } >> "$GITHUB_STEP_SUMMARY"
 
           if [ ${#conflict[@]} -gt 0 ]; then
@@ -79,6 +101,42 @@ jobs:
           if [ ${#missing[@]} -gt 0 ]; then
             echo "::notice::New upstream branches to create manually: ${missing[*]}"
           fi
+
+      - name: Fast-forward the upstream mirror branch
+        run: |
+          set -uo pipefail
+
+          up_default=$(gh api "repos/$UPSTREAM" --jq '.default_branch')
+          sha=$(gh api "repos/$UPSTREAM/commits/$up_default" --jq '.sha')
+
+          # A fork shares its object store with the parent, so upstream's tip is
+          # already present here: the ref moves without fetching or pushing anything.
+          if gh api --silent "repos/$GITHUB_REPOSITORY/git/refs/heads/$MIRROR_BRANCH" 2>/dev/null; then
+            # force=false keeps this fast-forward-only. A diverged mirror is rejected
+            # and reported rather than reset, which is the rule everywhere else here.
+            if out=$(gh api --method PATCH \
+                       "repos/$GITHUB_REPOSITORY/git/refs/heads/$MIRROR_BRANCH" \
+                       -f "sha=$sha" -F force=false --jq '.object.sha' 2>&1); then
+              result="advanced to ${out:0:10}"
+            else
+              result="could not be advanced: $out"
+              echo "::warning::$MIRROR_BRANCH $result"
+            fi
+          else
+            if out=$(gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+                       -f "ref=refs/heads/$MIRROR_BRANCH" -f "sha=$sha" \
+                       --jq '.object.sha' 2>&1); then
+              result="created at ${out:0:10}"
+            else
+              result="could not be created: $out"
+              echo "::warning::$MIRROR_BRANCH $result"
+            fi
+          fi
+
+          {
+            echo "## Mirror branch"
+            echo "- $MIRROR_BRANCH $result (tracking $UPSTREAM@$up_default)"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Sync tags
         run: |
